@@ -90,7 +90,10 @@ async def validate_vehicle_control(
     vehicle_control = user_input.get(CONF_VEHICLE_CONTROL, [])
     device_registry = dr.async_get(hass)
 
-    if vehicle_control and not user.data.get("registrationChannels"):
+    # Rivian API may return 2FA channels as registrationChannels or registrationChannels2FA
+    _LOGGER.debug("currentUser keys: %s", list(user.data.keys()))
+    has_2fa = user.data.get("registrationChannels") or user.data.get("registrationChannels2FA")
+    if vehicle_control and not has_2fa:
         await api.close()
         raise SchemaFlowError("2fa_missing")
 
