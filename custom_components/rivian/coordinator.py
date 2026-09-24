@@ -27,7 +27,6 @@ from .const import (
     ATTR_COORDINATOR,
     ATTR_USER,
     ATTR_VEHICLE,
-    CHARGING_API_FIELDS,
     DOMAIN,
     INVALID_SENSOR_STATES,
     VEHICLE_STATE_API_FIELDS,
@@ -126,9 +125,7 @@ class ChargingCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
     """Charging data update coordinator for Rivian."""
 
     key = "getLiveSessionData"
-    _unplugged_interval = 15 * 60  # 15 minutes
-    _plugged_interval = 30  # 30 seconds
-    _update_interval_seconds = _unplugged_interval  # 15 minutes
+    _update_interval_seconds = 0  # live session GraphQL disabled; no periodic refresh
 
     def __init__(
         self,
@@ -141,17 +138,25 @@ class ChargingCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         super().__init__(hass=hass, config_entry=config_entry, client=client)
         self.vehicle_id = vehicle_id
 
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Skip live charging GraphQL — Rivian removed the old session query shape.
+
+        ``getLiveSessionData`` is gone. ``getSessionStatus`` requires ``jobId`` and
+        returns ``SessionStartResponse``. ``getLiveSessionHistory`` exposes chart
+        points only. Until rivian-python-client maps a supported API to the prior
+        sensor fields, charging-session entities stay empty without blocking setup.
+        """
+        if self._error_count:
+            self._error_count = 0
+            self._set_update_interval()
+        return self.data or {}
+
     async def _fetch_data(self) -> ClientResponse:
-        """Fetch the data."""
-        return await self.api.get_live_charging_session(
-            vin=self.vehicle_id, properties=CHARGING_API_FIELDS
-        )
+        """Unused: :meth:`_async_update_data` does not call the charging GraphQL API."""
+        raise NotImplementedError
 
     def adjust_update_interval(self, is_plugged_in: bool) -> None:
-        """Adjust update interval based on plugged in status."""
-        self._set_update_interval(
-            self._plugged_interval if is_plugged_in else self._unplugged_interval
-        )
+        """Plug state ignored while live charging session API is unavailable."""
 
 
 class DriverKeyCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):

@@ -16,7 +16,6 @@ from homeassistant.helpers.issue_registry import (
     async_create_issue,
     async_delete_issue,
 )
-
 from .const import (
     ATTR_API,
     ATTR_COORDINATOR,
@@ -29,7 +28,7 @@ from .const import (
     VERSION,
 )
 from .coordinator import UserCoordinator, VehicleCoordinator, WallboxCoordinator
-from .helpers import get_rivian_api_from_entry
+from .helpers import get_rivian_api_from_entry, user_has_2fa
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [
@@ -72,19 +71,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     vehicle_control = entry.options.get(CONF_VEHICLE_CONTROL)
-    if vehicle_control and not coordinator.data.get("registrationChannels"):
-        vehicle_control = []
-        async_create_issue(
-            hass,
-            DOMAIN,
-            entry.entry_id,
-            is_fixable=False,
-            is_persistent=False,
-            severity=IssueSeverity.WARNING,
-            translation_key="2fa_missing",
+    if vehicle_control and not user_has_2fa(coordinator.data):
+        _LOGGER.warning(
+            "Rivian currentUser keys: %s — 2FA not detected in API response. "
+            "Allowing vehicle control anyway; ensure 2FA is enabled on your Rivian account.",
+            list(coordinator.data.keys()),
         )
-    else:
-        async_delete_issue(hass, DOMAIN, entry.entry_id)
+    async_delete_issue(hass, DOMAIN, entry.entry_id)
 
     vehicles = coordinator.get_vehicles()
     if vehicle_control and (

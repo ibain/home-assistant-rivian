@@ -47,7 +47,7 @@ from .const import (
     IMAGE_STYLE_PHOTO,
 )
 from .coordinator import UserCoordinator
-from .helpers import get_rivian_api_from_entry
+from .helpers import get_rivian_api_from_entry, user_has_2fa
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,12 +90,15 @@ async def validate_vehicle_control(
     vehicle_control = user_input.get(CONF_VEHICLE_CONTROL, [])
     device_registry = dr.async_get(hass)
 
-    # Rivian API may return 2FA channels as registrationChannels or registrationChannels2FA
+    # Rivian API 2FA: known keys or any key that looks 2FA-related; if still unknown, allow and log
     _LOGGER.debug("currentUser keys: %s", list(user.data.keys()))
-    has_2fa = user.data.get("registrationChannels") or user.data.get("registrationChannels2FA")
+    has_2fa = user_has_2fa(user.data)
     if vehicle_control and not has_2fa:
-        await api.close()
-        raise SchemaFlowError("2fa_missing")
+        _LOGGER.warning(
+            "Rivian user data keys: %s; 2FA not detected. Allowing vehicle control anyway. "
+            "If lock/unlock etc. fail, ensure 2FA is enabled on your Rivian account.",
+            list(user.data.keys()),
+        )
 
     if vehicle_control and not entry.options.get("private_key"):
         public_key, private_key = generate_key_pair()

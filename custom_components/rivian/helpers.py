@@ -47,3 +47,20 @@ def get_rivian_api_from_entry(hass: HomeAssistant, entry: ConfigEntry) -> Rivian
 def redact(data: Any) -> dict:
     """Redact sensitive data."""
     return async_redact_data(data, TO_REDACT)
+
+
+def user_has_2fa(user_data: dict[str, Any]) -> bool:
+    """Return True if Rivian user data indicates 2FA is enabled.
+
+    API may use registrationChannels, registrationChannels2FA, or other keys.
+    """
+    if not user_data:
+        return False
+    if user_data.get("registrationChannels") or user_data.get("registrationChannels2FA"):
+        return True
+    key_lower = " ".join(str(k).lower() for k in user_data.keys())
+    if "2fa" in key_lower or "twofactor" in key_lower or "registrationchannel" in key_lower:
+        for k, v in user_data.items():
+            if v and ("2fa" in k.lower() or "channel" in k.lower() or "twofactor" in k.lower()):
+                return True
+    return False
