@@ -1,0 +1,16 @@
+send_destination:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: rivian
+    location:
+      required: true
+      example: "Costco Wholesale, 1051 W Burbank Blvd, Burbank, CA 91506"
+      selector:
+        text:
+    wake:
+      default: true
+      selector:
+        boolean:
