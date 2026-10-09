@@ -72,14 +72,13 @@ def _get_vehicle(
     hass: HomeAssistant, device_id: str
 ) -> tuple[VehicleCoordinator, Rivian]:
     """Return the vehicle coordinator and API client for a device."""
-    if device := dr.async_get(hass).async_get(device_id):
-        for entry_id in device.config_entries:
-            if not (entry_data := hass.data.get(DOMAIN, {}).get(entry_id)):
-                continue
-            coordinators = entry_data[ATTR_COORDINATOR][ATTR_VEHICLE]
-            for domain, identifier in device.identifiers:
-                if domain == DOMAIN and identifier in coordinators:
-                    return coordinators[identifier], entry_data[ATTR_API]
+    if (device := dr.async_get(hass).async_get(device_id)) and (
+        entry_data := hass.data.get(DOMAIN, {}).get(device.config_entry_id)
+    ):
+        coordinators = entry_data[ATTR_COORDINATOR][ATTR_VEHICLE]
+        for domain, identifier in device.identifiers:
+            if domain == DOMAIN and identifier in coordinators:
+                return coordinators[identifier], entry_data[ATTR_API]
     raise ServiceValidationError(f"Device {device_id} is not a loaded Rivian vehicle")
 
 
