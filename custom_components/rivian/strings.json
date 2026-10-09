@@ -90,5 +90,25 @@
         "name": "Charging schedule end"
       }
     }
+  },
+  "services": {
+    "send_destination": {
+      "name": "Send destination",
+      "description": "Sends a navigation destination to the vehicle. Rivian looks up the text as a place search.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle to send the destination to."
+        },
+        "location": {
+          "name": "Location",
+          "description": "A place name, a business name with its address, a street address, or a Google Maps share link. A person's name will not resolve; send their address instead."
+        },
+        "wake": {
+          "name": "Wake vehicle",
+          "description": "Wake the vehicle first if it is asleep. Needs vehicle control to be set up; otherwise the destination is sent without waking."
+        }
+      }
+    }
   }
 }

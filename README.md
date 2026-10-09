@@ -77,6 +77,50 @@ To complete the pairing setup, configure the integration and select the vehicle(
 
 Note: If you are having issues with pairing your vehicle, we recommend investing in an ESP32 with Bluetooth proxy installed as it offers flexibility in placement and has been proven to work where other adapters have not.
 
+## Send a Destination
+
+The `rivian.send_destination` action sends a navigation destination to the vehicle, the same way "Send to vehicle" works in the Rivian app. The destination opens in Trip Details on the center display. If a trip is already open, it is added as the first stop.
+
+| Field       | Required | Description                                                                                         |
+| ----------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `device_id` | yes      | The vehicle                                                                                         |
+| `location`  | yes      | Text that Rivian looks up, see below                                                                |
+| `wake`      | no       | Wake the vehicle first if it's asleep (default `true`). Needs vehicle control; skipped without it |
+
+The action returns `{"result": <int>}` from Rivian. `0` means Rivian accepted the request, not that the place was found, so check the display when trying a new format.
+
+Rivian runs a place search on `location`:
+
+- Works: a place name ("Costco Goleta"), a business name with its address, a street address, a Google Maps share link (`https://maps.app.goo.gl/...`)
+- Doesn't work: a person's name, alone or with an address (it matches a business instead). Use their street address or a Google Maps share link of it.
+- A destination without a business name shows as its street address. A custom label can't be set.
+
+Example: send the next calendar event's location an hour before it starts. Any calendar integration works (Google Calendar, CalDAV for iCloud, Remote Calendar for an ICS feed). Add one trigger per calendar.
+
+```yaml
+automation:
+  - alias: "Send next event to the truck"
+    triggers:
+      - trigger: calendar
+        event: start
+        offset: "-1:00:00"
+        entity_id: calendar.personal
+      - trigger: calendar
+        event: start
+        offset: "-1:00:00"
+        entity_id: calendar.icloud
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.calendar_event.location | default('', true) | trim != '' }}"
+    actions:
+      - action: rivian.send_destination
+        data:
+          device_id: YOUR_VEHICLE_DEVICE_ID
+          location: "{{ trigger.calendar_event.location }}"
+```
+
+**Caveat:** this uses Rivian's `ParseAndShareLocationToVehicle` GraphQL mutation, an unofficial endpoint documented under "legacy" at [rivian-api.kaedenb.org](https://rivian-api.kaedenb.org/app/legacy/controls/share-location/). Rivian could change or remove it at any time.
+
 ## Available Sensors
 
 | Name                                                | Domain         | Description                            |
