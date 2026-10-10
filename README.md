@@ -144,7 +144,8 @@ automation:
       - action: rivian.send_destination
         data:
           device_id: YOUR_VEHICLE_DEVICE_ID
-          location: "{{ location }}"
+          # the place plan_trip resolved, so the vehicle loads the trip that was planned
+          location: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or location }}"
 ```
 
 Trips longer than three hours need a longer trigger offset, or a once-a-day automation that runs `plan_trip` for the day's events and sends the first one early enough.
