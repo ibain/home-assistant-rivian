@@ -30,6 +30,9 @@
     "services": {
         "send_destination": {
             "service": "mdi:map-marker-path"
+        },
+        "end_trip": {
+            "service": "mdi:map-marker-off"
         }
     }
 }

@@ -106,7 +106,21 @@
         },
         "wake": {
           "name": "Wake vehicle",
-          "description": "Wake the vehicle first if it is asleep. Needs vehicle control to be set up; otherwise the destination is sent without waking."
+          "description": "Wake the vehicle first if it is asleep."
+        },
+        "replace": {
+          "name": "Replace current trip",
+          "description": "End the vehicle's current trip first, so the destination doesn't get added as an extra stop."
+        }
+      }
+    },
+    "end_trip": {
+      "name": "End trip",
+      "description": "Clears the vehicle's active trip, like the End Trip button on the display.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle whose trip to end."
         }
       }
     }
