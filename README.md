@@ -79,15 +79,18 @@ Note: If you are having issues with pairing your vehicle, we recommend investing
 
 ## Send a Destination
 
-The `rivian.send_destination` action sends a navigation destination to the vehicle, the same way "Send to vehicle" works in the Rivian app. The destination opens in Trip Details on the center display. If a trip is already open, it is added as the first stop.
+The `rivian.send_destination` action sends a navigation destination to the vehicle, the same way "Send to vehicle" works in the Rivian app. The destination opens in Trip Details on the center display.
 
-| Field       | Required | Description                                                                                         |
-| ----------- | -------- | --------------------------------------------------------------------------------------------------- |
-| `device_id` | yes      | The vehicle                                                                                         |
-| `location`  | yes      | Text that Rivian looks up, see below                                                                |
-| `wake`      | no       | Wake the vehicle first if it's asleep (default `true`). Needs vehicle control; skipped without it |
+| Field       | Required | Description                                                                                                              |
+| ----------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `device_id` | yes      | The vehicle                                                                                                              |
+| `location`  | yes      | Text that Rivian looks up, see below                                                                                     |
+| `wake`      | no       | Wake the vehicle first if it's asleep (default `true`). Asks Rivian to wake it, and also sends a wake command if vehicle control is set up |
+| `replace`   | no       | End the vehicle's current trip first (default `true`). With `false`, the destination is added as a stop ahead of any open trip |
 
 The action returns `{"result": <int>}` from Rivian. `0` means Rivian accepted the request, not that the place was found, so check the display when trying a new format.
+
+The `rivian.end_trip` action clears the vehicle's active trip, like the End Trip button on the display. It takes `device_id` and returns `{"success": <bool>, "sequence_number": <int>}`. Rivian wakes a sleeping vehicle for it.
 
 Rivian runs a place search on `location`:
 
@@ -119,7 +122,7 @@ automation:
           location: "{{ trigger.calendar_event.location }}"
 ```
 
-**Caveat:** this uses Rivian's `ParseAndShareLocationToVehicle` GraphQL mutation, an unofficial endpoint documented under "legacy" at [rivian-api.kaedenb.org](https://rivian-api.kaedenb.org/app/legacy/controls/share-location/). Rivian could change or remove it at any time.
+**Caveat:** these use Rivian's `ParseAndShareLocationToVehicle` mutation (documented under "legacy" at [rivian-api.kaedenb.org](https://rivian-api.kaedenb.org/app/legacy/controls/share-location/)) and the app's `SendUpdatedTrip` Parallax command, both unofficial. Rivian could change or remove them at any time.
 
 ## Available Sensors
 

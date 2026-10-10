@@ -14,3 +14,15 @@ send_destination:
       default: true
       selector:
         boolean:
+    replace:
+      default: true
+      selector:
+        boolean:
+
+end_trip:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: rivian

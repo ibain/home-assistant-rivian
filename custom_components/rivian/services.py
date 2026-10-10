@@ -20,30 +20,36 @@ from homeassistant.core import (
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 
-from .api_ext import async_share_location
+from .api_ext import async_end_trip, async_share_location
 from .const import (
     ATTR_API,
     ATTR_COORDINATOR,
+    ATTR_USER,
     ATTR_VEHICLE,
     CONF_VEHICLE_CONTROL,
     DOMAIN,
 )
-from .coordinator import VehicleCoordinator
+from .coordinator import UserCoordinator, VehicleCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_SEND_DESTINATION = "send_destination"
+SERVICE_END_TRIP = "end_trip"
 ATTR_LOCATION = "location"
 ATTR_WAKE = "wake"
+ATTR_REPLACE = "replace"
 WAKE_TIMEOUT = 30
 
+DEVICE_SCHEMA = {vol.Required(ATTR_DEVICE_ID): cv.string}
 SEND_DESTINATION_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_DEVICE_ID): cv.string,
+    DEVICE_SCHEMA
+    | {
         vol.Required(ATTR_LOCATION): vol.All(cv.string, str.strip, vol.Length(min=1)),
         vol.Optional(ATTR_WAKE, default=True): cv.boolean,
+        vol.Optional(ATTR_REPLACE, default=True): cv.boolean,
     }
 )
+END_TRIP_SCHEMA = vol.Schema(DEVICE_SCHEMA)
 
 
 @callback
@@ -54,16 +60,34 @@ def async_setup_services(hass: HomeAssistant) -> None:
         coordinator, api = _get_vehicle(hass, call.data[ATTR_DEVICE_ID])
         if call.data[ATTR_WAKE]:
             await _async_wake(hass, coordinator)
+        if call.data[ATTR_REPLACE]:
+            # Otherwise the destination is added as a stop ahead of any open trip.
+            await async_end_trip(
+                api, coordinator.vehicle_id, _user_id(hass, coordinator)
+            )
         result = await async_share_location(
-            api, coordinator.vehicle_id, call.data[ATTR_LOCATION]
+            api, coordinator.vehicle_id, call.data[ATTR_LOCATION], call.data[ATTR_WAKE]
         )
         return {"result": result}
+
+    async def async_end_trip_service(call: ServiceCall) -> ServiceResponse:
+        coordinator, api = _get_vehicle(hass, call.data[ATTR_DEVICE_ID])
+        return await async_end_trip(
+            api, coordinator.vehicle_id, _user_id(hass, coordinator)
+        )
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_SEND_DESTINATION,
         async_send_destination,
         schema=SEND_DESTINATION_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_END_TRIP,
+        async_end_trip_service,
+        schema=END_TRIP_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
 
@@ -80,6 +104,13 @@ def _get_vehicle(
             if domain == DOMAIN and identifier in coordinators:
                 return coordinators[identifier], entry_data[ATTR_API]
     raise ServiceValidationError(f"Device {device_id} is not a loaded Rivian vehicle")
+
+
+def _user_id(hass: HomeAssistant, coordinator: VehicleCoordinator) -> str | None:
+    """Return the Rivian user id for the vehicle's config entry."""
+    entry_data = hass.data[DOMAIN][coordinator.config_entry.entry_id]
+    user: UserCoordinator = entry_data[ATTR_COORDINATOR][ATTR_USER]
+    return (user.data or {}).get("id")
 
 
 async def _async_wake(hass: HomeAssistant, coordinator: VehicleCoordinator) -> None:
