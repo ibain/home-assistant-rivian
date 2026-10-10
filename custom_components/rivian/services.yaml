@@ -26,3 +26,20 @@ end_trip:
       selector:
         device:
           integration: rivian
+
+plan_trip:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: rivian
+    location:
+      required: true
+      example: "Costco Goleta"
+      selector:
+        text:
+    departure_time:
+      required: false
+      selector:
+        datetime:
