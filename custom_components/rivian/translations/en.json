@@ -122,6 +122,24 @@
           "description": "The Rivian vehicle whose trip to end."
         }
       }
+    },
+    "plan_trip": {
+      "name": "Plan trip",
+      "description": "Plans a trip from the vehicle's current position with Rivian's trip planner and returns the drive time, charging stops and arrival charge. Nothing is sent to the vehicle.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle to plan for."
+        },
+        "location": {
+          "name": "Destination",
+          "description": "A place name, address, Google Maps share link, or latitude,longitude."
+        },
+        "departure_time": {
+          "name": "Departure time",
+          "description": "When the trip starts. Defaults to now."
+        }
+      }
     }
   }
 }

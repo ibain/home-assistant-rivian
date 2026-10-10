@@ -26,6 +26,27 @@ SHARE_LOCATION_QUERY = (
     "vehicleId: $vehicleId, requiresWakeup: $requiresWakeup) "
     "{ publishResponse { result } } }"
 )
+PLACES_QUERY = (
+    "query places($params: PlacesQueryParams!) { places(params: $params) { "
+    "results { id name location { formattedAddress coordinate { latitude longitude } "
+    "navCoordinate { latitude longitude } } } } }"
+)
+PLACE_BY_URL_QUERY = (
+    "query PlaceByUrl($url: String!, $userLocation: GeoCoordinatesInput) { "
+    "placeByUrl(url: $url, userLocation: $userLocation) { id name location { "
+    "formattedAddress coordinate { latitude longitude } "
+    "navCoordinate { latitude longitude } } } }"
+)
+PLAN_TRIP_QUERY = (
+    "query planTripWithMultiStopV2($waypoints: [RequestWaypointInput!]!, "
+    "$vehicle: String!, $startingSoc: Float, $departureTime: UnixTimestamp) { "
+    "planTrip2(waypoints: $waypoints, vehicle: $vehicle, startingSoc: $startingSoc, "
+    "departureTime: $departureTime) { plans { waypoints { waypointType latitude "
+    "longitude charger { name chargeDurationSeconds } } summary { "
+    "destinationReachable totalChargeDurationSeconds totalDriveDurationSeconds "
+    "totalDriveDistanceMeters totalTripDurationSeconds arrivalSOCPercent } } "
+    "status } }"
+)
 SEND_UPDATED_TRIP_QUERY = (
     "mutation SendUpdatedTrip($vehicleId: String!, $payload: String!) { "
     "sendParallaxPayload(payload: $payload, meta: { vehicleId: $vehicleId "
@@ -95,6 +116,116 @@ async def async_end_trip(
         ) from err
     _LOGGER.debug("End trip sent to %s: %s", vehicle_id, result)
     return {"success": success, "sequence_number": sequence}
+
+
+async def async_find_place(
+    api: Rivian, query: str, near: tuple[float, float] | None
+) -> dict[str, Any] | None:
+    """Resolve a place name, address or map share link to a place.
+
+    Returns {name, address, latitude, longitude} using the road-side
+    navCoordinate, or None when nothing matches. `near` biases the search.
+    """
+    user_location = {"latitude": near[0], "longitude": near[1]} if near else None
+    if query.startswith(("http://", "https://")):
+        data = await _async_gateway(
+            api,
+            {
+                "operationName": "PlaceByUrl",
+                "variables": {"url": query, "userLocation": user_location},
+                "query": PLACE_BY_URL_QUERY,
+            },
+            "the place link",
+        )
+        place = (data or {}).get("placeByUrl")
+    else:
+        data = await _async_gateway(
+            api,
+            {
+                "operationName": "places",
+                "variables": {
+                    "params": {
+                        "query": query,
+                        "userLocation": user_location,
+                        "maxResults": 1,
+                    }
+                },
+                "query": PLACES_QUERY,
+            },
+            "the place search",
+        )
+        results = ((data or {}).get("places") or {}).get("results") or []
+        place = results[0] if results else None
+    if not place:
+        return None
+    location = place["location"]
+    coordinate = location.get("navCoordinate") or location["coordinate"]
+    return {
+        "name": place.get("name"),
+        "address": location.get("formattedAddress"),
+        "latitude": coordinate["latitude"],
+        "longitude": coordinate["longitude"],
+    }
+
+
+async def async_plan_trip(
+    api: Rivian,
+    vehicle_id: str,
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    soc: float | None,
+    departure_time: int | None,
+) -> dict[str, Any]:
+    """Plan a trip with Rivian's planner, charging stops included.
+
+    Returns the plan summary in seconds and meters plus the charging stops.
+    """
+    variables: dict[str, Any] = {
+        "waypoints": [
+            {"latitude": origin[0], "longitude": origin[1]},
+            {"latitude": destination[0], "longitude": destination[1]},
+        ],
+        "vehicle": vehicle_id,
+    }
+    if soc is not None:
+        variables["startingSoc"] = soc
+    if departure_time is not None:
+        variables["departureTime"] = departure_time
+    data = await _async_gateway(
+        api,
+        {
+            "operationName": "planTripWithMultiStopV2",
+            "variables": variables,
+            "query": PLAN_TRIP_QUERY,
+        },
+        "the trip plan",
+    )
+    plan = (data or {}).get("planTrip2") or {}
+    plans = plan.get("plans") or []
+    if plan.get("status") != "OK" or not plans:
+        raise HomeAssistantError(
+            f"Rivian could not plan the trip (status {plan.get('status')})"
+        )
+    summary = plans[0]["summary"]
+    stops = [
+        {
+            "name": waypoint["charger"]["name"],
+            "charge_seconds": waypoint["charger"]["chargeDurationSeconds"],
+            "latitude": waypoint["latitude"],
+            "longitude": waypoint["longitude"],
+        }
+        for waypoint in plans[0].get("waypoints") or []
+        if waypoint.get("charger")
+    ]
+    return {
+        "trip_seconds": summary["totalTripDurationSeconds"],
+        "drive_seconds": summary["totalDriveDurationSeconds"],
+        "charge_seconds": summary["totalChargeDurationSeconds"],
+        "distance_meters": summary["totalDriveDistanceMeters"],
+        "arrival_soc": summary["arrivalSOCPercent"],
+        "destination_reachable": summary["destinationReachable"],
+        "charging_stops": stops,
+    }
 
 
 def end_trip_payload(user_id: str | None, now_ms: int, correlation_id: bytes) -> bytes:

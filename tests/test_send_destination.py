@@ -12,6 +12,8 @@ from rivian.rivian import GRAPHQL_GATEWAY
 
 from custom_components.rivian.api_ext import (
     async_end_trip,
+    async_find_place,
+    async_plan_trip,
     async_share_location,
     end_trip_payload,
 )
@@ -25,6 +27,7 @@ from custom_components.rivian.const import (
 )
 from custom_components.rivian.services import (
     SERVICE_END_TRIP,
+    SERVICE_PLAN_TRIP,
     SERVICE_SEND_DESTINATION,
     async_setup_services,
 )
@@ -40,6 +43,57 @@ SHARE_OK = {
     "data": {"parseAndShareLocationToVehicle": {"publishResponse": {"result": 0}}}
 }
 END_TRIP_OK = {"data": {"sendParallaxPayload": {"success": True, "sequenceNumber": 0}}}
+PLACE = {
+    "id": "ChIJ3",
+    "name": "Costco Wholesale",
+    "location": {
+        "formattedAddress": "7095 Market Pl Dr #474c, Goleta, CA 93117, USA",
+        "coordinate": {"latitude": 34.4280052, "longitude": -119.8747787},
+        "navCoordinate": {"latitude": 34.4283714, "longitude": -119.8741895},
+    },
+}
+PLACES_OK = {"data": {"places": {"results": [PLACE]}}}
+PLACE_BY_URL_OK = {"data": {"placeByUrl": PLACE}}
+PLAN_OK = {
+    "data": {
+        "planTrip2": {
+            "status": "OK",
+            "plans": [
+                {
+                    "waypoints": [
+                        {
+                            "waypointType": "OTHER",
+                            "latitude": 34.18,
+                            "longitude": -118.33,
+                        },
+                        {
+                            "waypointType": "DC_CHARGE_STATION",
+                            "latitude": 35.4,
+                            "longitude": -119.5,
+                            "charger": {
+                                "name": "Buttonwillow, CA",
+                                "chargeDurationSeconds": 900,
+                            },
+                        },
+                        {
+                            "waypointType": "OTHER",
+                            "latitude": 37.77,
+                            "longitude": -122.42,
+                        },
+                    ],
+                    "summary": {
+                        "destinationReachable": True,
+                        "totalChargeDurationSeconds": 900,
+                        "totalDriveDurationSeconds": 20000,
+                        "totalDriveDistanceMeters": 600000,
+                        "totalTripDurationSeconds": 20900,
+                        "arrivalSOCPercent": 12.5,
+                    },
+                }
+            ],
+        }
+    }
+}
 
 
 def _mock_api(*responses: tuple[dict[str, Any], int] | dict[str, Any]) -> MagicMock:
@@ -173,7 +227,12 @@ def _setup_vehicle(
         identifiers={(DOMAIN, VIN), (DOMAIN, VEHICLE_ID)},
     )
     coordinator = MagicMock(vehicle_id=VEHICLE_ID, config_entry=entry)
-    coordinator.get = MagicMock(return_value=power_state)
+    coordinator.get = MagicMock(
+        side_effect=lambda key: {"powerState": power_state, "batteryLevel": 69.9}.get(
+            key
+        )
+    )
+    coordinator.data = {"gnssLocation": {"latitude": 34.181, "longitude": -118.327}}
     coordinator.send_vehicle_command = AsyncMock()
     coordinator._awake = asyncio.Event()
     coordinator._awake.set()
@@ -290,3 +349,123 @@ async def test_end_trip_service(hass: HomeAssistant) -> None:
 
     assert result == {"success": True, "sequence_number": 0}
     assert _operations(api) == ["SendUpdatedTrip"]
+
+
+async def test_find_place_text_uses_places() -> None:
+    """Free text goes to the places search, biased to the vehicle's position."""
+    api = _mock_api(PLACES_OK)
+
+    place = await async_find_place(api, "Costco Goleta", (34.181, -118.327))
+
+    body = api._Rivian__graphql_query.call_args.args[2]
+    assert body["operationName"] == "places"
+    assert body["variables"]["params"] == {
+        "query": "Costco Goleta",
+        "userLocation": {"latitude": 34.181, "longitude": -118.327},
+        "maxResults": 1,
+    }
+    assert place == {
+        "name": "Costco Wholesale",
+        "address": "7095 Market Pl Dr #474c, Goleta, CA 93117, USA",
+        "latitude": 34.4283714,
+        "longitude": -119.8741895,
+    }
+
+
+async def test_find_place_link_uses_place_by_url() -> None:
+    """A map share link goes to PlaceByUrl; no match returns None."""
+    api = _mock_api(PLACE_BY_URL_OK, {"data": {"placeByUrl": None}})
+
+    assert (await async_find_place(api, "https://maps.app.goo.gl/x", None))["name"]
+    assert api._Rivian__graphql_query.call_args.args[2]["operationName"] == "PlaceByUrl"
+    assert await async_find_place(api, "https://maps.app.goo.gl/y", None) is None
+
+
+async def test_plan_trip_summary() -> None:
+    """The plan's summary and charging stops come back in plain units."""
+    api = _mock_api(PLAN_OK)
+
+    plan = await async_plan_trip(
+        api, VEHICLE_ID, (34.18, -118.33), (37.77, -122.42), 69.9, 1_760_000_000
+    )
+
+    body = api._Rivian__graphql_query.call_args.args[2]
+    assert body["operationName"] == "planTripWithMultiStopV2"
+    assert body["variables"] == {
+        "waypoints": [
+            {"latitude": 34.18, "longitude": -118.33},
+            {"latitude": 37.77, "longitude": -122.42},
+        ],
+        "vehicle": VEHICLE_ID,
+        "startingSoc": 69.9,
+        "departureTime": 1_760_000_000,
+    }
+    assert plan == {
+        "trip_seconds": 20900,
+        "drive_seconds": 20000,
+        "charge_seconds": 900,
+        "distance_meters": 600000,
+        "arrival_soc": 12.5,
+        "destination_reachable": True,
+        "charging_stops": [
+            {
+                "name": "Buttonwillow, CA",
+                "charge_seconds": 900,
+                "latitude": 35.4,
+                "longitude": -119.5,
+            }
+        ],
+    }
+
+
+async def test_plan_trip_failed_status() -> None:
+    """A non-OK plan status raises."""
+    api = _mock_api({"data": {"planTrip2": {"status": "NO_ROUTE", "plans": []}}})
+    with pytest.raises(HomeAssistantError, match="NO_ROUTE"):
+        await async_plan_trip(api, VEHICLE_ID, (0, 0), (1, 1), None, None)
+
+
+async def test_plan_trip_service(hass: HomeAssistant) -> None:
+    """plan_trip geocodes the text, plans from the vehicle, and returns both."""
+    device, _, api = _setup_vehicle(hass, "ready", True, PLACES_OK, PLAN_OK)
+
+    result = await _call(
+        hass, SERVICE_PLAN_TRIP, device_id=device.id, location="Costco Goleta"
+    )
+
+    assert _operations(api) == ["places", "planTripWithMultiStopV2"]
+    plan_vars = api._Rivian__graphql_query.call_args_list[1].args[2]["variables"]
+    assert plan_vars["waypoints"][0] == {"latitude": 34.181, "longitude": -118.327}
+    assert plan_vars["waypoints"][1] == {
+        "latitude": 34.4283714,
+        "longitude": -119.8741895,
+    }
+    assert plan_vars["startingSoc"] == 69.9
+    assert result["destination"]["name"] == "Costco Wholesale"
+    assert result["trip_seconds"] == 20900
+
+
+async def test_plan_trip_service_coordinates(hass: HomeAssistant) -> None:
+    """A bare lat,lon skips the place search."""
+    device, _, api = _setup_vehicle(hass, "ready", True, PLAN_OK)
+
+    result = await _call(
+        hass, SERVICE_PLAN_TRIP, device_id=device.id, location="37.77, -122.42"
+    )
+
+    assert _operations(api) == ["planTripWithMultiStopV2"]
+    assert result["destination"] == {
+        "name": None,
+        "address": None,
+        "latitude": 37.77,
+        "longitude": -122.42,
+    }
+
+
+async def test_plan_trip_service_no_place(hass: HomeAssistant) -> None:
+    """An unresolvable destination is a validation error."""
+    device, _, _ = _setup_vehicle(
+        hass, "ready", True, {"data": {"places": {"results": []}}}
+    )
+    with pytest.raises(ServiceValidationError, match="No place found"):
+        await _call(hass, SERVICE_PLAN_TRIP, device_id=device.id, location="zzz")

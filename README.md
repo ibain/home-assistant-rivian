@@ -98,29 +98,56 @@ Rivian runs a place search on `location`:
 - Doesn't work: a person's name, alone or with an address (it matches a business instead). Use their street address or a Google Maps share link of it.
 - A destination without a business name shows as its street address. A custom label can't be set.
 
-Example: send the next calendar event's location an hour before it starts. Any calendar integration works (Google Calendar, CalDAV for iCloud, Remote Calendar for an ICS feed). Add one trigger per calendar.
+### Plan a Trip
+
+The `rivian.plan_trip` action asks Rivian's trip planner how long a trip from the vehicle's current position would take, charging stops included. Nothing is sent to the vehicle.
+
+| Field            | Required | Description                                                               |
+| ---------------- | -------- | ------------------------------------------------------------------------- |
+| `device_id`      | yes      | The vehicle                                                               |
+| `location`       | yes      | A place name, address, Google Maps share link, or `latitude,longitude`    |
+| `departure_time` | no       | When the trip starts (default: now)                                       |
+
+It returns `trip_seconds` (drive plus charging), `drive_seconds`, `charge_seconds`, `distance_meters`, `arrival_soc`, `destination_reachable`, `charging_stops` (name, `charge_seconds`, coordinates) and `destination` (the resolved `name`, `address`, `latitude`, `longitude`). The place lookup is the same Google-backed search the Rivian app uses, so the same formats work as for `send_destination`.
+
+### Example: leave on time for the next calendar event
+
+Three hours before each event with a location, plan the trip, wait until it's time to leave (trip time plus a buffer), then send the destination. Any calendar integration works (Google Calendar, CalDAV for iCloud, Remote Calendar for an ICS feed); add one trigger per calendar. The wait runs inside the automation, so a Home Assistant restart during those hours drops it.
 
 ```yaml
 automation:
-  - alias: "Send next event to the truck"
+  - alias: "Send next event to the truck when it's time to leave"
+    mode: parallel
     triggers:
       - trigger: calendar
         event: start
-        offset: "-1:00:00"
+        offset: "-3:00:00"
         entity_id: calendar.personal
-      - trigger: calendar
-        event: start
-        offset: "-1:00:00"
-        entity_id: calendar.icloud
-    conditions:
-      - condition: template
-        value_template: "{{ trigger.calendar_event.location | default('', true) | trim != '' }}"
     actions:
+      - variables:
+          buffer_minutes: 15
+          location: >-
+            {{ trigger.calendar_event.location | default('', true)
+               | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
+      - condition: template
+        # skip events with no location, or a meeting link instead of a place
+        value_template: "{{ location != '' and ('://' not in location or 'maps' in location) }}"
+      - action: rivian.plan_trip
+        data:
+          device_id: YOUR_VEHICLE_DEVICE_ID
+          location: "{{ location }}"
+        response_variable: plan
+      - delay:
+          seconds: >-
+            {{ [0, (as_datetime(trigger.calendar_event.start) - now()).total_seconds()
+                   - plan.trip_seconds - buffer_minutes * 60] | max | int }}
       - action: rivian.send_destination
         data:
           device_id: YOUR_VEHICLE_DEVICE_ID
-          location: "{{ trigger.calendar_event.location }}"
+          location: "{{ location }}"
 ```
+
+Trips longer than three hours need a longer trigger offset, or a once-a-day automation that runs `plan_trip` for the day's events and sends the first one early enough.
 
 **Caveat:** these use Rivian's `ParseAndShareLocationToVehicle` mutation (documented under "legacy" at [rivian-api.kaedenb.org](https://rivian-api.kaedenb.org/app/legacy/controls/share-location/)) and the app's `SendUpdatedTrip` Parallax command, both unofficial. Rivian could change or remove them at any time.
 

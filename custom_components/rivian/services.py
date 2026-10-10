@@ -17,10 +17,15 @@ from homeassistant.core import (
     SupportsResponse,
     callback,
 )
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 
-from .api_ext import async_end_trip, async_share_location
+from .api_ext import (
+    async_end_trip,
+    async_find_place,
+    async_plan_trip,
+    async_share_location,
+)
 from .const import (
     ATTR_API,
     ATTR_COORDINATOR,
@@ -35,7 +40,9 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_SEND_DESTINATION = "send_destination"
 SERVICE_END_TRIP = "end_trip"
+SERVICE_PLAN_TRIP = "plan_trip"
 ATTR_LOCATION = "location"
+ATTR_DEPARTURE_TIME = "departure_time"
 ATTR_WAKE = "wake"
 ATTR_REPLACE = "replace"
 WAKE_TIMEOUT = 30
@@ -50,6 +57,13 @@ SEND_DESTINATION_SCHEMA = vol.Schema(
     }
 )
 END_TRIP_SCHEMA = vol.Schema(DEVICE_SCHEMA)
+PLAN_TRIP_SCHEMA = vol.Schema(
+    DEVICE_SCHEMA
+    | {
+        vol.Required(ATTR_LOCATION): vol.All(cv.string, str.strip, vol.Length(min=1)),
+        vol.Optional(ATTR_DEPARTURE_TIME): cv.datetime,
+    }
+)
 
 
 @callback
@@ -83,6 +97,33 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema=SEND_DESTINATION_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
+
+    async def async_plan_trip_service(call: ServiceCall) -> ServiceResponse:
+        coordinator, api = _get_vehicle(hass, call.data[ATTR_DEVICE_ID])
+        location = (coordinator.data or {}).get("gnssLocation") or {}
+        if location.get("latitude") is None:
+            raise HomeAssistantError("The vehicle's location is not known yet")
+        origin = (location["latitude"], location["longitude"])
+        if coords := _parse_coordinates(call.data[ATTR_LOCATION]):
+            destination = {"name": None, "address": None}
+            destination["latitude"], destination["longitude"] = coords
+        elif not (
+            destination := await async_find_place(api, call.data[ATTR_LOCATION], origin)
+        ):
+            raise ServiceValidationError(
+                f"No place found for {call.data[ATTR_LOCATION]!r}"
+            )
+        departure = call.data.get(ATTR_DEPARTURE_TIME)
+        plan = await async_plan_trip(
+            api,
+            coordinator.vehicle_id,
+            origin,
+            (destination["latitude"], destination["longitude"]),
+            coordinator.get("batteryLevel"),
+            int(departure.timestamp()) if departure else None,
+        )
+        return {"destination": destination, **plan}
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_END_TRIP,
@@ -90,6 +131,27 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema=END_TRIP_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PLAN_TRIP,
+        async_plan_trip_service,
+        schema=PLAN_TRIP_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+
+def _parse_coordinates(text: str) -> tuple[float, float] | None:
+    """Return (lat, lon) if text is a bare 'lat,lon' pair."""
+    parts = text.split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        lat, lon = (float(p) for p in parts)
+    except ValueError:
+        return None
+    if -90 <= lat <= 90 and -180 <= lon <= 180:
+        return lat, lon
+    return None
 
 
 def _get_vehicle(
