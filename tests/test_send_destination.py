@@ -1,4 +1,4 @@
-"""Tests for the send_destination action."""
+"""Tests for the send_destination and end_trip actions."""
 
 import asyncio
 from typing import Any
@@ -10,15 +10,21 @@ from rivian import VehicleCommand
 from rivian.exceptions import RivianApiException
 from rivian.rivian import GRAPHQL_GATEWAY
 
-from custom_components.rivian.api_ext import async_share_location
+from custom_components.rivian.api_ext import (
+    async_end_trip,
+    async_share_location,
+    end_trip_payload,
+)
 from custom_components.rivian.const import (
     ATTR_API,
     ATTR_COORDINATOR,
+    ATTR_USER,
     ATTR_VEHICLE,
     CONF_VEHICLE_CONTROL,
     DOMAIN,
 )
 from custom_components.rivian.services import (
+    SERVICE_END_TRIP,
     SERVICE_SEND_DESTINATION,
     async_setup_services,
 )
@@ -27,34 +33,41 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.device_registry as dr
 
 VEHICLE_ID = "01-123"
+USER_ID = "02-456"
 VIN = "7FCTGAAA0NN000001"
 LOCATION = "Costco Wholesale, 1051 W Burbank Blvd, Burbank, CA 91506"
+SHARE_OK = {
+    "data": {"parseAndShareLocationToVehicle": {"publishResponse": {"result": 0}}}
+}
+END_TRIP_OK = {"data": {"sendParallaxPayload": {"success": True, "sequenceNumber": 0}}}
 
 
-def _mock_api(response_json: dict[str, Any], status: int = 200) -> MagicMock:
-    """Return a Rivian client whose GraphQL helper returns response_json."""
-    response = MagicMock(status=status)
-    response.json = AsyncMock(return_value=response_json)
+def _mock_api(*responses: tuple[dict[str, Any], int] | dict[str, Any]) -> MagicMock:
+    """Return a Rivian client whose GraphQL helper returns the responses in turn."""
+    mocks = []
+    for item in responses:
+        response_json, status = item if isinstance(item, tuple) else (item, 200)
+        response = MagicMock(status=status)
+        response.json = AsyncMock(return_value=response_json)
+        mocks.append(response)
     api = MagicMock(
         _csrf_token="csrf", _app_session_token="a-sess", _user_session_token="u-sess"
     )
-    api._Rivian__graphql_query = AsyncMock(return_value=response)
+    api._Rivian__graphql_query = AsyncMock(side_effect=mocks)
     return api
 
 
-def _ok(result: int = 0) -> dict[str, Any]:
-    return {
-        "data": {
-            "parseAndShareLocationToVehicle": {"publishResponse": {"result": result}}
-        }
-    }
+def _operations(api: MagicMock) -> list[str]:
+    return [
+        c.args[2]["operationName"] for c in api._Rivian__graphql_query.call_args_list
+    ]
 
 
 async def test_share_location_request() -> None:
     """The mutation goes to the gateway with the session headers."""
-    api = _mock_api(_ok())
+    api = _mock_api(SHARE_OK)
 
-    assert await async_share_location(api, VEHICLE_ID, LOCATION) == 0
+    assert await async_share_location(api, VEHICLE_ID, LOCATION, wake=False) == 0
 
     headers, url, body = api._Rivian__graphql_query.call_args.args
     assert url == GRAPHQL_GATEWAY
@@ -62,12 +75,16 @@ async def test_share_location_request() -> None:
     assert headers["A-Sess"] == "a-sess"
     assert headers["U-Sess"] == "u-sess"
     assert body["operationName"] == "ParseAndShareLocationToVehicle"
-    assert body["variables"] == {"str": LOCATION, "vehicleId": VEHICLE_ID}
+    assert body["variables"] == {
+        "str": LOCATION,
+        "vehicleId": VEHICLE_ID,
+        "requiresWakeup": False,
+    }
 
 
 async def test_share_location_graphql_error_hides_tokens() -> None:
     """GraphQL errors surface their message but never the request headers."""
-    api = _mock_api({})
+    api = _mock_api()
     api._Rivian__graphql_query.side_effect = RivianApiException(
         "Error occurred while reading the graphql response from Rivian.",
         400,
@@ -83,7 +100,7 @@ async def test_share_location_graphql_error_hides_tokens() -> None:
 
 @pytest.mark.parametrize(
     ("response_json", "status"),
-    [({"data": None}, 200), (_ok(), 500)],
+    [({"data": None}, 200), (SHARE_OK, 500)],
 )
 async def test_share_location_bad_response(
     response_json: dict[str, Any], status: int
@@ -91,12 +108,60 @@ async def test_share_location_bad_response(
     """A missing result or non-200 status raises."""
     with pytest.raises(HomeAssistantError):
         await async_share_location(
-            _mock_api(response_json, status), VEHICLE_ID, LOCATION
+            _mock_api((response_json, status)), VEHICLE_ID, LOCATION
         )
 
 
+def test_end_trip_payload_bytes() -> None:
+    """The payload matches the app's protobuf layout (verified live 2026-10-10)."""
+    correlation_id = bytes(range(16))
+    payload = end_trip_payload("user-placeholder", 1_760_000_000_000, correlation_id)
+
+    expected = bytes.fromhex(
+        "5232"  # 10: value (50 bytes)
+        "1230"  # 2: bytes (48)
+        "0a18"
+        "0a16"
+        + b"end_trip_1760000000000".hex()  # 1: plan { 1: abrpRouteId }
+        + "1200"  # 2: preferences {}
+        "1a12"
+        "0a10"
+        + b"user-placeholder".hex()  # 3: publisher { 1: userId }
+        + "6208"
+        "0880f09dc706"
+        "1000"  # 12: Timestamp { 1: 1760000000, 2: 0 }
+        "820110" + correlation_id.hex()  # 16: correlationId
+    )
+    assert payload == expected
+
+
+def test_end_trip_payload_without_user() -> None:
+    """No publisher field when the user id is unknown."""
+    payload = end_trip_payload(None, 1_760_000_000_000, bytes(16))
+    # value is 30 bytes: plan (26) + empty preferences (2), no publisher
+    assert payload.startswith(bytes.fromhex("521e121c0a180a16"))
+    assert b"\x1a" not in payload
+
+
+async def test_end_trip_request() -> None:
+    """End trip sends SendUpdatedTrip with a base64 payload and returns the result."""
+    api = _mock_api(END_TRIP_OK)
+
+    result = await async_end_trip(api, VEHICLE_ID, USER_ID)
+
+    assert result == {"success": True, "sequence_number": 0}
+    body = api._Rivian__graphql_query.call_args.args[2]
+    assert body["operationName"] == "SendUpdatedTrip"
+    assert body["variables"]["vehicleId"] == VEHICLE_ID
+    assert "c2v_navigation.trip_copilot.updated_trip" in body["query"]
+    assert body["variables"]["payload"].isascii()
+
+
 def _setup_vehicle(
-    hass: HomeAssistant, power_state: str = "ready", control: bool = True
+    hass: HomeAssistant,
+    power_state: str = "ready",
+    control: bool = True,
+    *responses: dict[str, Any],
 ) -> tuple[dr.DeviceEntry, MagicMock, MagicMock]:
     """Register a vehicle device and its loaded entry data."""
     entry = MockConfigEntry(
@@ -112,38 +177,61 @@ def _setup_vehicle(
     coordinator.send_vehicle_command = AsyncMock()
     coordinator._awake = asyncio.Event()
     coordinator._awake.set()
-    api = _mock_api(_ok())
+    api = _mock_api(*(responses or (END_TRIP_OK, SHARE_OK)))
     vehicle = {"phone_identity_id": "identity-1"} if control else {}
     hass.data[DOMAIN] = {
         entry.entry_id: {
             ATTR_API: api,
             ATTR_VEHICLE: {VEHICLE_ID: vehicle},
-            ATTR_COORDINATOR: {ATTR_VEHICLE: {VEHICLE_ID: coordinator}},
+            ATTR_COORDINATOR: {
+                ATTR_USER: MagicMock(data={"id": USER_ID}),
+                ATTR_VEHICLE: {VEHICLE_ID: coordinator},
+            },
         }
     }
     async_setup_services(hass)
     return device, coordinator, api
 
 
-async def _send(hass: HomeAssistant, device_id: str, **data: Any) -> Any:
+async def _call(hass: HomeAssistant, service: str, **data: Any) -> Any:
     return await hass.services.async_call(
-        DOMAIN,
-        SERVICE_SEND_DESTINATION,
-        {"device_id": device_id, "location": LOCATION, **data},
-        blocking=True,
-        return_response=True,
+        DOMAIN, service, data, blocking=True, return_response=True
     )
 
 
-async def test_send_destination(hass: HomeAssistant) -> None:
-    """The device resolves to its vehicle id and the result is returned."""
+async def test_send_destination_replaces_trip(hass: HomeAssistant) -> None:
+    """By default the current trip is ended before the destination is sent."""
     device, coordinator, api = _setup_vehicle(hass)
 
-    assert await _send(hass, device.id) == {"result": 0}
+    result = await _call(
+        hass, SERVICE_SEND_DESTINATION, device_id=device.id, location=LOCATION
+    )
 
-    body = api._Rivian__graphql_query.call_args.args[2]
-    assert body["variables"]["vehicleId"] == VEHICLE_ID
+    assert result == {"result": 0}
+    assert _operations(api) == ["SendUpdatedTrip", "ParseAndShareLocationToVehicle"]
+    end_trip, share = (c.args[2] for c in api._Rivian__graphql_query.call_args_list)
+    assert end_trip["variables"]["vehicleId"] == VEHICLE_ID
+    assert share["variables"] == {
+        "str": LOCATION,
+        "vehicleId": VEHICLE_ID,
+        "requiresWakeup": True,
+    }
     coordinator.send_vehicle_command.assert_not_called()
+
+
+async def test_send_destination_without_replace(hass: HomeAssistant) -> None:
+    """replace: false only sends the destination."""
+    device, _, api = _setup_vehicle(hass, "ready", True, SHARE_OK)
+
+    await _call(
+        hass,
+        SERVICE_SEND_DESTINATION,
+        device_id=device.id,
+        location=LOCATION,
+        replace=False,
+    )
+
+    assert _operations(api) == ["ParseAndShareLocationToVehicle"]
 
 
 async def test_send_destination_not_a_vehicle(hass: HomeAssistant) -> None:
@@ -155,14 +243,16 @@ async def test_send_destination_not_a_vehicle(hass: HomeAssistant) -> None:
     )
 
     with pytest.raises(ServiceValidationError):
-        await _send(hass, wallbox.id)
+        await _call(
+            hass, SERVICE_SEND_DESTINATION, device_id=wallbox.id, location=LOCATION
+        )
 
 
 async def test_send_destination_wakes_sleeping_vehicle(hass: HomeAssistant) -> None:
     """A sleeping vehicle is woken first when vehicle control is set up."""
     device, coordinator, _ = _setup_vehicle(hass, power_state="sleep")
 
-    await _send(hass, device.id)
+    await _call(hass, SERVICE_SEND_DESTINATION, device_id=device.id, location=LOCATION)
 
     coordinator.send_vehicle_command.assert_awaited_once_with(
         VehicleCommand.WAKE_VEHICLE
@@ -175,12 +265,28 @@ async def test_send_destination_wakes_sleeping_vehicle(hass: HomeAssistant) -> N
 async def test_send_destination_skips_wake(
     hass: HomeAssistant, control: bool, wake: bool
 ) -> None:
-    """No wake without vehicle control, or when wake is off; still sends."""
-    device, coordinator, api = _setup_vehicle(
-        hass, power_state="sleep", control=control
+    """No wake command without vehicle control, or when wake is off; still sends."""
+    device, coordinator, api = _setup_vehicle(hass, "sleep", control)
+
+    result = await _call(
+        hass,
+        SERVICE_SEND_DESTINATION,
+        device_id=device.id,
+        location=LOCATION,
+        wake=wake,
     )
 
-    assert await _send(hass, device.id, wake=wake) == {"result": 0}
-
+    assert result == {"result": 0}
     coordinator.send_vehicle_command.assert_not_called()
-    api._Rivian__graphql_query.assert_awaited_once()
+    share = api._Rivian__graphql_query.call_args_list[-1].args[2]
+    assert share["variables"]["requiresWakeup"] is wake
+
+
+async def test_end_trip_service(hass: HomeAssistant) -> None:
+    """end_trip resolves the device and returns Rivian's result."""
+    device, _, api = _setup_vehicle(hass, "ready", True, END_TRIP_OK)
+
+    result = await _call(hass, SERVICE_END_TRIP, device_id=device.id)
+
+    assert result == {"success": True, "sequence_number": 0}
+    assert _operations(api) == ["SendUpdatedTrip"]
