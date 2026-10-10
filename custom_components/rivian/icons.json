@@ -33,6 +33,9 @@
         },
         "end_trip": {
             "service": "mdi:map-marker-off"
+        },
+        "plan_trip": {
+            "service": "mdi:map-clock"
         }
     }
 }
