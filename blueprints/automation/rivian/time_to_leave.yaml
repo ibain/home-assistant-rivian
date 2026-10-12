@@ -1,0 +1,161 @@
+blueprint:
+  name: "Rivian: send calendar events to the vehicle when it's time to leave"
+  description: >-
+    Ahead of each calendar event with a location, ask Rivian's trip planner how long
+    the drive takes from where the vehicle is, wait until it's time to leave, then send
+    the destination to the vehicle. Needs the Rivian (Unofficial) integration's
+    rivian.plan_trip and rivian.send_destination actions.
+  domain: automation
+  source_url: https://github.com/ibain/home-assistant-rivian/blob/fork/main/blueprints/automation/rivian/time_to_leave.yaml
+  input:
+    vehicle:
+      name: Vehicle
+      selector:
+        device:
+          integration: rivian
+    calendars:
+      name: Calendars
+      description: Events with a location on these calendars are sent to the vehicle.
+      selector:
+        entity:
+          domain: calendar
+          multiple: true
+    look_ahead:
+      name: Look ahead
+      description: >-
+        How long before an event to plan the trip. Trips longer than this are sent
+        as soon as the trip is planned.
+      default:
+        hours: 3
+      selector:
+        duration: {}
+    buffer_minutes:
+      name: Buffer
+      description: Minutes before "just in time" to send the destination.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 180
+          unit_of_measurement: min
+    include_charging:
+      name: Include charging time
+      description: Count the planner's charging stops in the travel time, not just driving.
+      default: true
+      selector:
+        boolean: {}
+    replace:
+      name: Replace the current trip
+      description: End whatever trip is loaded before sending. Off adds the destination as a stop.
+      default: true
+      selector:
+        boolean: {}
+    wait_for_park:
+      name: Wait until parked
+      description: Never send while the vehicle is moving; wait for Park first.
+      default: true
+      selector:
+        boolean: {}
+    max_park_wait:
+      name: Longest wait for Park
+      description: Give up if the vehicle keeps driving this long past the send time.
+      default:
+        hours: 2
+      selector:
+        duration: {}
+    earliest_time:
+      name: Earliest send time
+      description: Never send before this time of day (an early event is sent at this time instead).
+      default: "06:00:00"
+      selector:
+        time: {}
+    skip_pattern:
+      name: Skip events matching
+      description: >-
+        Regular expression; events whose location or title matches are skipped.
+        The default skips meeting links. Leave empty to skip nothing.
+      default: "://"
+      selector:
+        text: {}
+    notify_service:
+      name: Notify action (optional)
+      description: >-
+        An action to call when a destination is sent, for example
+        notify.mobile_app_my_phone. Leave empty for no notification.
+      default: ""
+      selector:
+        text: {}
+
+mode: parallel
+max_exceeded: silent
+
+triggers:
+  - trigger: calendar.event_started
+    target:
+      entity_id: !input calendars
+    options:
+      offset: !input look_ahead
+      offset_type: before
+
+variables:
+  vehicle: !input vehicle
+  buffer_minutes: !input buffer_minutes
+  include_charging: !input include_charging
+  replace: !input replace
+  wait_for_park: !input wait_for_park
+  earliest_time: !input earliest_time
+  skip_pattern: !input skip_pattern
+  notify_service: !input notify_service
+  title: "{{ trigger.calendar_event.summary | default('', true) }}"
+  location: >-
+    {{ trigger.calendar_event.location | default('', true)
+       | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
+  gear_sensor: >-
+    {{ device_entities(vehicle) | select('search', 'gear_selector') | first | default('') }}
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ location != '' and 'T' in trigger.calendar_event.start
+         and not (skip_pattern and (location is search(skip_pattern) or title is search(skip_pattern))) }}
+
+actions:
+  - action: rivian.plan_trip
+    data:
+      device_id: !input vehicle
+      location: "{{ location }}"
+    response_variable: plan
+  - variables:
+      travel_seconds: "{{ plan.trip_seconds if include_charging else plan.drive_seconds }}"
+      destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or location }}"
+      send_at: >-
+        {% set start = as_datetime(trigger.calendar_event.start) | as_local %}
+        {% set just_in_time = start - timedelta(seconds=travel_seconds + buffer_minutes * 60) %}
+        {% set earliest = today_at(earliest_time) %}
+        {{ (earliest if (just_in_time < earliest and earliest < start) else just_in_time).isoformat() }}
+  - delay:
+      seconds: "{{ [0, (as_datetime(send_at) - now()).total_seconds()] | max | int }}"
+  - if:
+      - condition: template
+        value_template: "{{ wait_for_park and gear_sensor != '' }}"
+    then:
+      - wait_template: "{{ is_state(gear_sensor, 'Park') }}"
+        timeout: !input max_park_wait
+        continue_on_timeout: false
+  - action: rivian.send_destination
+    data:
+      device_id: !input vehicle
+      location: "{{ destination }}"
+      replace: "{{ replace }}"
+  - if:
+      - condition: template
+        value_template: "{{ notify_service != '' }}"
+    then:
+      - action: "{{ notify_service }}"
+        data:
+          title: "Sent to vehicle: {{ title }}"
+          message: >-
+            {{ destination }}. Leave by
+            {{ (as_datetime(trigger.calendar_event.start) - timedelta(seconds=travel_seconds)) | as_local | as_timestamp | timestamp_custom('%-I:%M %p') }}
+            ({{ (travel_seconds / 60) | round | int }} min
+            {%- if plan.charge_seconds %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
