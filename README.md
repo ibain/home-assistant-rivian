@@ -110,7 +110,18 @@ The `rivian.plan_trip` action asks Rivian's trip planner how long a trip from th
 
 It returns `trip_seconds` (drive plus charging), `drive_seconds`, `charge_seconds`, `distance_meters`, `arrival_soc`, `destination_reachable`, `charging_stops` (name, `charge_seconds`, coordinates) and `destination` (the resolved `name`, `address`, `latitude`, `longitude`). The place lookup is the same Google-backed search the Rivian app uses, so the same formats work as for `send_destination`.
 
+### Blueprints
+
+Two blueprints wrap the actions into automations with settings in the UI:
+
+- **Time to leave** (`blueprints/automation/rivian/time_to_leave.yaml`): ahead of each calendar event with a location, plans the trip from the vehicle's position, waits until start minus travel time minus a buffer, waits for the vehicle to be parked, and sends the destination. Settings: look-ahead, buffer, include charging time, replace the current trip, wait until parked, earliest send time, a skip pattern for meeting links, and an optional notification with the leave-by time. Watches any number of calendars.
+- **First event of the day** (`blueprints/automation/rivian/first_event_of_day.yaml`): at a fixed time each morning, sends the day's first event with a location, so long trips are loaded before you're up.
+
+Import them in Home Assistant under Settings → Automations & scenes → Blueprints → Import blueprint, with the raw GitHub URL of the file, then create an automation from each.
+
 ### Example: leave on time for the next calendar event
+
+The same logic as the "time to leave" blueprint, as plain YAML.
 
 Three hours before each event with a location, plan the trip, wait until it's time to leave (trip time plus a buffer), then send the destination. Any calendar integration works (Google Calendar, CalDAV for iCloud, Remote Calendar for an ICS feed); add one trigger per calendar. The wait runs inside the automation, so a Home Assistant restart during those hours drops it.
 
@@ -141,6 +152,10 @@ automation:
           seconds: >-
             {{ [0, (as_datetime(trigger.calendar_event.start) - now()).total_seconds()
                    - plan.trip_seconds - buffer_minutes * 60] | max | int }}
+      # never replace a trip while driving: wait until the vehicle is parked
+      - wait_template: "{{ is_state('sensor.YOUR_VEHICLE_gear_selector', 'Park') }}"
+        timeout: "2:00:00"
+        continue_on_timeout: false
       - action: rivian.send_destination
         data:
           device_id: YOUR_VEHICLE_DEVICE_ID
@@ -149,6 +164,8 @@ automation:
 ```
 
 Trips longer than three hours need a longer trigger offset, or a once-a-day automation that runs `plan_trip` for the day's events and sends the first one early enough.
+
+Put the full street address in the event (including "Blvd", "St" and the city): the place search guesses when parts are missing, and a guess can land on the wrong side of town. The navigation actions work wherever the vehicle is; only the vehicle control entities are limited by the integration's zone setting.
 
 **Caveat:** these use Rivian's `ParseAndShareLocationToVehicle` mutation (documented under "legacy" at [rivian-api.kaedenb.org](https://rivian-api.kaedenb.org/app/legacy/controls/share-location/)) and the app's `SendUpdatedTrip` Parallax command, both unofficial. Rivian could change or remove them at any time.
 
