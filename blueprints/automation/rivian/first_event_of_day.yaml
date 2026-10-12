@@ -1,0 +1,121 @@
+blueprint:
+  name: "Rivian: send the day's first event to the vehicle each morning"
+  description: >-
+    At a fixed time each day, find the first calendar event of the day with a location,
+    plan the trip and send the destination to the vehicle, so it's loaded before you're
+    up. Covers trips longer than the look-ahead of the "time to leave" blueprint.
+    Needs the Rivian (Unofficial) integration's rivian.plan_trip and
+    rivian.send_destination actions.
+  domain: automation
+  source_url: https://github.com/ibain/home-assistant-rivian/blob/fork/main/blueprints/automation/rivian/first_event_of_day.yaml
+  input:
+    vehicle:
+      name: Vehicle
+      selector:
+        device:
+          integration: rivian
+    calendars:
+      name: Calendars
+      selector:
+        entity:
+          domain: calendar
+          multiple: true
+    send_time:
+      name: Send time
+      description: Time of day to send the first event.
+      default: "06:00:00"
+      selector:
+        time: {}
+    include_charging:
+      name: Include charging time
+      default: true
+      selector:
+        boolean: {}
+    buffer_minutes:
+      name: Buffer
+      description: Minutes of slack used in the leave-by time in the notification.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 180
+          unit_of_measurement: min
+    replace:
+      name: Replace the current trip
+      default: true
+      selector:
+        boolean: {}
+    skip_pattern:
+      name: Skip events matching
+      description: Regular expression; events whose location or title matches are skipped.
+      default: "://"
+      selector:
+        text: {}
+    notify_service:
+      name: Notify action (optional)
+      description: For example notify.mobile_app_my_phone. Leave empty for no notification.
+      default: ""
+      selector:
+        text: {}
+
+mode: single
+
+triggers:
+  - trigger: time
+    at: !input send_time
+
+variables:
+  vehicle: !input vehicle
+  include_charging: !input include_charging
+  buffer_minutes: !input buffer_minutes
+  replace: !input replace
+  skip_pattern: !input skip_pattern
+  notify_service: !input notify_service
+
+actions:
+  - action: calendar.get_events
+    target:
+      entity_id: !input calendars
+    data:
+      start_date_time: "{{ now().isoformat() }}"
+      end_date_time: "{{ today_at('23:59:59').isoformat() }}"
+    response_variable: events
+  - variables:
+      event: >-
+        {% set ns = namespace(found=none) %}
+        {% for ev in events.values() | map(attribute='events') | sum(start=[]) | sort(attribute='start') %}
+          {% set loc = ev.location | default('', true) | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim %}
+          {% set title = ev.summary | default('', true) %}
+          {% if ns.found is none and loc != '' and 'T' in ev.start
+                and not (skip_pattern and (loc is search(skip_pattern) or title is search(skip_pattern))) %}
+            {% set ns.found = {'start': ev.start, 'title': title, 'location': loc} %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.found }}
+  - condition: template
+    value_template: "{{ event is mapping }}"
+  - action: rivian.plan_trip
+    data:
+      device_id: !input vehicle
+      location: "{{ event.location }}"
+    response_variable: plan
+  - variables:
+      travel_seconds: "{{ plan.trip_seconds if include_charging else plan.drive_seconds }}"
+      destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or event.location }}"
+  - action: rivian.send_destination
+    data:
+      device_id: !input vehicle
+      location: "{{ destination }}"
+      replace: "{{ replace }}"
+  - if:
+      - condition: template
+        value_template: "{{ notify_service != '' }}"
+    then:
+      - action: "{{ notify_service }}"
+        data:
+          title: "Sent to vehicle: {{ event.title }}"
+          message: >-
+            {{ destination }}. Leave by
+            {{ (as_datetime(event.start) - timedelta(seconds=travel_seconds + buffer_minutes * 60)) | as_local | as_timestamp | timestamp_custom('%-I:%M %p') }}
+            ({{ (travel_seconds / 60) | round | int }} min
+            {%- if plan.charge_seconds %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
