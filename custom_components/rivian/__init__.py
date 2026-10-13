@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+import shutil
 
 from rivian import Rivian
 
@@ -51,9 +53,29 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the Rivian actions."""
+    """Set up the Rivian actions and install the bundled blueprints."""
     async_setup_services(hass)
+    await hass.async_add_executor_job(
+        install_blueprints, Path(hass.config.path("blueprints", "automation", DOMAIN))
+    )
     return True
+
+
+def install_blueprints(target: Path) -> None:
+    """Copy the bundled automation blueprints into the config's blueprint folder.
+
+    Overwrites earlier copies so updates reach users; a customized copy should
+    live under a different folder name.
+    """
+    source = Path(__file__).parent / "blueprints"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for blueprint in source.glob("*.yaml"):
+            dest = target / blueprint.name
+            if not dest.exists() or dest.read_bytes() != blueprint.read_bytes():
+                shutil.copyfile(blueprint, dest)
+    except OSError as err:
+        _LOGGER.warning("Could not install blueprints into %s: %s", target, err)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
