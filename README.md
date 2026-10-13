@@ -110,14 +110,45 @@ The `rivian.plan_trip` action asks Rivian's trip planner how long a trip from th
 
 It returns `trip_seconds` (drive plus charging), `drive_seconds`, `charge_seconds`, `distance_meters`, `arrival_soc`, `destination_reachable`, `charging_stops` (name, `charge_seconds`, coordinates) and `destination` (the resolved `name`, `address`, `latitude`, `longitude`). The place lookup is the same Google-backed search the Rivian app uses, so the same formats work as for `send_destination`.
 
-### Blueprints
+### Calendar to vehicle: setup
 
-Two blueprints wrap the actions into automations with settings in the UI:
+Two blueprints turn the actions into "send my next calendar event to the vehicle when it's time to leave", with every setting in the Home Assistant UI.
 
-- **Time to leave** (`blueprints/automation/rivian/time_to_leave.yaml`): ahead of each calendar event with a location, plans the trip from the vehicle's position, sends the destination early (if no other event with a location comes first) and again just in time, always waiting for the vehicle to be parked. Settings: look-ahead, when to send (early, just in time, or both), a traffic factor (Rivian's drive times are free-flow) or an optional Google Travel Time entry for traffic-aware drive times, buffer, include charging time, replace the current trip, longest wait for Park, earliest send time, a skip pattern for meeting links, and an optional notification with the leave-by time. Watches any number of calendars.
-- **First event of the day** (`blueprints/automation/rivian/first_event_of_day.yaml`): at a fixed time each morning, sends the day's first event with a location, so long trips are loaded before you're up.
+- **Time to leave**: ahead of each calendar event with a location, plans the trip from the vehicle's position, sends the destination early (if no other event with a location comes first) and again just in time (start minus travel time minus a buffer), always waiting for the vehicle to be parked. Drive time comes from Google when configured (traffic-aware), otherwise from Rivian's planner times a traffic factor; charging stops always come from Rivian's planner.
+- **First event of the day**: at a fixed time each morning, sends the day's first event with a location, so long trips are loaded before you're up.
 
-Import them in Home Assistant under Settings → Automations & scenes → Blueprints → Import blueprint, with the raw GitHub URL of the file, then create an automation from each.
+You need: Home Assistant 2026.8 or newer, this integration 1.5.9 or newer, a calendar in Home Assistant, and (optional) the Home Assistant companion app for the leave-by notifications.
+
+**1. Connect your calendar.** Settings → Devices & services → Add integration: [Google Calendar](https://www.home-assistant.io/integrations/google/) for Google, [CalDAV](https://www.home-assistant.io/integrations/caldav/) for iCloud, [Remote Calendar](https://www.home-assistant.io/integrations/remote_calendar/) for an Outlook/ICS feed. Each calendar becomes a `calendar.*` entity. Events need a street address in their location field: pick the place from the calendar app's suggestions, or write the full address including the city.
+
+**2. Find the blueprints.** The integration installs them on startup (1.5.10 and newer) under Settings → Automations & scenes → **Blueprints**, named "Rivian: send calendar events to the vehicle when it's time to leave" and "Rivian: send the day's first event to the vehicle each morning". Updates to the integration refresh them; to customize one, copy it under another folder name in `config/blueprints/automation/`. On older versions, import them from `custom_components/rivian/blueprints/` in this repository.
+
+**3. Create the automations.** On each blueprint, Create automation. Pick the vehicle and your calendars; the defaults work as they are. For notifications, type your phone's notify action, for example `notify.mobile_app_my_phone` (Developer tools → Actions lists them). Settings on "Time to leave":
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Look ahead | 3 h | How long before an event the trip is planned and sent early |
+| When to send | Early and just in time | Early loads it right away; just in time sends again at start − travel − buffer, so a trip loaded in between doesn't cost you the destination |
+| Traffic factor | 1.5 | Rivian's drive times are free-flow; used when Google isn't set up |
+| Google Travel Time | empty | Traffic-aware drive times, see step 4 |
+| Buffer | 15 min | Slack before the leave-by time |
+| Include charging time | on | Counts the planner's charging stops |
+| Replace the current trip | on | Ends the loaded trip first instead of adding a stop |
+| Longest wait for Park | 2 h | Sends never happen while driving; this caps the wait |
+| Earliest send time | 06:00 | No sends overnight |
+| Skip events matching | `://` | Skips meeting links; a regular expression |
+
+**4. Optional: Google for traffic-aware drive times.** Rivian's planner doesn't know about traffic (home to Irvine reads 56 min at any time of day; Google says 2 h at 4:30 PM). Google's Routes API fixes that, at no cost for a few calls a day, but the setup has a few traps:
+
+1. At [console.cloud.google.com](https://console.cloud.google.com), create a project and attach a billing account to it. Google requires one even for free-tier use, and may ask for a prepayment to open it (US$30 in one case). That money sits as credit against usage, which stays at zero at a few calls a day, and Google refunds the unused balance if you close the billing account and ask. A budget alert of $1 is a good safety net.
+2. In **that same project**: APIs & Services → Library → enable **Routes API**.
+3. APIs & Services → Credentials → Create credentials → API key. Edit the key: Application restrictions **None** (Home Assistant calls from a server; a website or app restriction blocks it), API restrictions → only **Routes API**.
+4. Wait a few minutes for the key to propagate, then in Home Assistant add the **Google Travel Time** integration with the key (origin and destination can be anything, e.g. your vehicle's device tracker and `zone.home`).
+5. Open the "Time to leave" automation and pick that entry in the Google Travel Time field.
+
+"The Routes API is not enabled for this API key" almost always means the key and the enabled API are in different projects, the key has an application restriction, or it hasn't propagated yet.
+
+**What to expect.** The notification reads like "Loaded: Dentist. 1 Main St, Burbank, CA. Leave by 8:38 AM (82 min with traffic)." A Home Assistant restart drops automation runs that are waiting, so an event inside the look-ahead window at restart time is only sent if the restart happens before its trigger. Deleting an event after it was sent doesn't clear the vehicle; the next send replaces it, or call `rivian.end_trip`.
 
 ### Example: leave on time for the next calendar event
 
