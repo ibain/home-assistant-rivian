@@ -7,7 +7,7 @@ blueprint:
     Needs the Rivian (Unofficial) integration's rivian.plan_trip and
     rivian.send_destination actions.
   domain: automation
-  source_url: https://github.com/ibain/home-assistant-rivian/blob/fork/main/blueprints/automation/rivian/first_event_of_day.yaml
+  source_url: https://github.com/ibain/home-assistant-rivian/blob/fork/main/custom_components/rivian/blueprints/first_event_of_day.yaml
   input:
     vehicle:
       name: Vehicle
