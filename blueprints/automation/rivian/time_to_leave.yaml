@@ -56,6 +56,16 @@ blueprint:
           min: 1
           max: 3
           step: 0.1
+    google_entry:
+      name: Google Travel Time (optional)
+      description: >-
+        A Google Travel Time integration entry. When set, Google's traffic-aware drive
+        time replaces the planner's drive time times the traffic factor. Charging time
+        still comes from Rivian's planner.
+      default: ""
+      selector:
+        config_entry:
+          integration: google_travel_time
     buffer_minutes:
       name: Buffer
       description: Minutes of slack before the leave-by time.
@@ -123,6 +133,7 @@ variables:
   calendars: !input calendars
   send_mode: !input send_mode
   traffic_factor: !input traffic_factor
+  google_entry: !input google_entry
   buffer_minutes: !input buffer_minutes
   include_charging: !input include_charging
   replace: !input replace
@@ -158,8 +169,43 @@ actions:
       end_date_time: "{{ (as_datetime(start) - timedelta(seconds=1)).isoformat() }}"
     response_variable: upcoming
   - variables:
+      tracker: "{{ device_entities(vehicle) | select('search', '^device_tracker\\.') | first | default('') }}"
+      estimated_drive: "{{ (plan.drive_seconds * traffic_factor) | int }}"
+      depart_time: >-
+        {% set t = as_datetime(start) | as_local - timedelta(seconds=estimated_drive) %}
+        {{ t.strftime('%H:%M') if t > now() else '' }}
+      google_seconds: 0
+  # Google's traffic-aware drive time, when a Google Travel Time entry is set
+  - if:
+      - condition: template
+        value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none }}"
+    then:
+      - choose:
+          - conditions: "{{ depart_time != '' }}"
+            sequence:
+              - action: google_travel_time.get_travel_times
+                continue_on_error: true
+                data:
+                  config_entry_id: "{{ google_entry }}"
+                  origin: "{{ state_attr(tracker, 'latitude') }},{{ state_attr(tracker, 'longitude') }}"
+                  destination: "{{ plan.destination.latitude }},{{ plan.destination.longitude }}"
+                  traffic_model: best_guess
+                  departure_time: "{{ depart_time }}"
+                response_variable: google
+        default:
+          - action: google_travel_time.get_travel_times
+            continue_on_error: true
+            data:
+              config_entry_id: "{{ google_entry }}"
+              origin: "{{ state_attr(tracker, 'latitude') }},{{ state_attr(tracker, 'longitude') }}"
+              destination: "{{ plan.destination.latitude }},{{ plan.destination.longitude }}"
+              traffic_model: best_guess
+            response_variable: google
+      - variables:
+          google_seconds: "{{ (google.routes[0].duration | default(0)) if google is defined else 0 }}"
+  - variables:
       travel_seconds: >-
-        {{ (plan.drive_seconds * traffic_factor + (plan.charge_seconds if include_charging else 0)) | int }}
+        {{ ((google_seconds if google_seconds | int > 0 else estimated_drive) + (plan.charge_seconds if include_charging else 0)) | int }}
       destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or location }}"
       leave_by: "{{ (as_datetime(start) - timedelta(seconds=travel_seconds)) | as_local }}"
       send_at: >-
@@ -178,7 +224,7 @@ actions:
         {{ ns.n == 0 }}
       summary: >-
         {{ destination }}. Leave by {{ leave_by | as_timestamp | timestamp_custom('%-I:%M %p') }}
-        ({{ (travel_seconds / 60) | round | int }} min
+        ({{ (travel_seconds / 60) | round | int }} min{{ ' with traffic' if google_seconds | int > 0 else ' est.' }}
         {%- if plan.charge_seconds and include_charging %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
   # early send: only when nothing with a location comes first
   - if:
