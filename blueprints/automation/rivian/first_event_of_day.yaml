@@ -26,6 +26,15 @@ blueprint:
       default: "06:00:00"
       selector:
         time: {}
+    traffic_factor:
+      name: Traffic factor
+      description: Rivian's drive times are free-flow; drive time is multiplied by this for the leave-by time.
+      default: 1.5
+      selector:
+        number:
+          min: 1
+          max: 3
+          step: 0.1
     include_charging:
       name: Include charging time
       default: true
@@ -66,6 +75,7 @@ triggers:
 
 variables:
   vehicle: !input vehicle
+  traffic_factor: !input traffic_factor
   include_charging: !input include_charging
   buffer_minutes: !input buffer_minutes
   replace: !input replace
@@ -100,7 +110,7 @@ actions:
       location: "{{ event.location }}"
     response_variable: plan
   - variables:
-      travel_seconds: "{{ plan.trip_seconds if include_charging else plan.drive_seconds }}"
+      travel_seconds: "{{ (plan.drive_seconds * traffic_factor + (plan.charge_seconds if include_charging else 0)) | int }}"
       destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or event.location }}"
   - action: rivian.send_destination
     data:
