@@ -18,6 +18,19 @@ send_destination:
       default: true
       selector:
         boolean:
+    wait_for_park:
+      default: true
+      selector:
+        boolean:
+    park_timeout:
+      default:
+        hours: 2
+      selector:
+        duration:
+    not_after:
+      required: false
+      selector:
+        datetime:
 
 end_trip:
   fields:

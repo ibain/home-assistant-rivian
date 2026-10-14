@@ -87,10 +87,13 @@ The `rivian.send_destination` action sends a navigation destination to the vehic
 | `location`  | yes      | Text that Rivian looks up, see below                                                                                     |
 | `wake`      | no       | Wake the vehicle first if it's asleep (default `true`). Asks Rivian to wake it, and also sends a wake command if vehicle control is set up |
 | `replace`   | no       | End the vehicle's current trip first (default `true`). With `false`, the destination is added as a stop ahead of any open trip |
+| `wait_for_park` | no   | Wait until the vehicle is in Park before sending (default `true`), so a trip being driven is never replaced |
+| `park_timeout`  | no   | Give up with an error if the vehicle isn't in Park within this time (default 2 hours) |
+| `not_after`     | no   | Skip the send, without an error, if this time has passed; for example the event's start |
 
 With `replace: true`, a rejected end-trip command stops the send. Navigation commands for the same vehicle run in order, so overlapping automations cannot split an end-trip/send pair.
 
-The action returns `{"result": <int>}` from Rivian. `0` means Rivian accepted the request, not that the place was found, so check the display when trying a new format.
+The action returns `{"result": <int>, "sent": true}` from Rivian, or `{"result": null, "sent": false}` when `not_after` had passed. `result: 0` means Rivian accepted the request, not that the place was found, so check the display when trying a new format.
 
 The `rivian.end_trip` action clears the vehicle's active trip, like the End Trip button on the display. It takes `device_id` and returns `{"success": <bool>, "sequence_number": <int>}`. For a sleeping vehicle, it may stay queued until the vehicle wakes. The server's wake hint alone does not reliably wake it.
 
@@ -116,24 +119,20 @@ Calls made by a Home Assistant user require access to the selected vehicle: read
 
 ### Calendar to vehicle: setup
 
-Two blueprints turn the actions into "send my next calendar event to the vehicle when it's time to leave", with every setting in the Home Assistant UI.
-
-- **Time to leave**: ahead of each calendar event with a location, plans the trip from the vehicle's position, sends the destination early (if no other event with a location comes first) and again just in time (start minus travel time minus a buffer), always waiting for the vehicle to be parked. Drive time comes from Google when configured (traffic-aware), otherwise from Rivian's planner times a traffic factor; charging stops always come from Rivian's planner.
-- **First event of the day**: at a fixed time each morning, sends the day's first event with a location, waiting for Park before sending, so long trips are loaded before you're up.
+One blueprint turns the actions into "send my next calendar event to the vehicle when it's time to leave", with every setting in the Home Assistant UI. Ahead of each calendar event with a location, it plans the trip from the vehicle's position, sends the destination early (if no other event with a location comes first) and again just in time (start minus travel time minus a buffer). Each morning it can also send the day's first event, so long trips are loaded before you're up. Sends wait for the vehicle to be parked and are skipped once the event has started. Drive time comes from Google when configured (traffic-aware), otherwise from Rivian's planner times a traffic factor; charging stops always come from Rivian's planner.
 
 You need: Home Assistant 2026.8 or newer, this integration 1.5.9 or newer, a calendar in Home Assistant, and (optional) the Home Assistant companion app for the leave-by notifications.
 
 **1. Connect your calendar.** Settings → Devices & services → Add integration: [Google Calendar](https://www.home-assistant.io/integrations/google/) for Google, [CalDAV](https://www.home-assistant.io/integrations/caldav/) for iCloud, [Remote Calendar](https://www.home-assistant.io/integrations/remote_calendar/) for an Outlook/ICS feed. Each calendar becomes a `calendar.*` entity. Events need a street address in their location field: pick the place from the calendar app's suggestions, or write the full address including the city.
 
-**2. Find the blueprints.** The integration installs them on startup (1.5.10 and newer) under Settings → Automations & scenes → **Blueprints**, named "Rivian: send calendar events to the vehicle when it's time to leave" and "Rivian: send the day's first event to the vehicle each morning". Updates to the integration refresh them; to customize one, copy it under another folder name in `config/blueprints/automation/`. On older versions, import them from `custom_components/rivian/blueprints/` in this repository.
+**2. Find the blueprint.** The integration installs it on startup (1.5.10 and newer) under Settings → Automations & scenes → **Blueprints**, named "Rivian: send calendar events to the vehicle when it's time to leave". Updates to the integration refresh it; to customize it, copy it under another folder name in `config/blueprints/automation/`. On older versions, import it from `custom_components/rivian/blueprints/` in this repository.
 
-**3. Create the automations.** On each blueprint, Create automation. Pick the vehicle, its **Gear Selector** sensor, and your calendars; the other defaults work as they are. Sends wait for that sensor to read Park, and it must belong to the selected vehicle. If you created automations from a version before 1.5.14, edit each one and select its Gear Selector; the input is required.
+**3. Create the automation.** On the blueprint, Create automation. Pick the vehicle and your calendars; the other defaults work as they are. If you still have an automation from the retired "first event of the day" blueprint, delete it: the morning send is now a setting here.
 
-For notifications, type your phone's notify action, for example `notify.mobile_app_my_phone` (Developer tools → Actions lists them). Settings on "Time to leave":
+For notifications, type your phone's notify action, for example `notify.mobile_app_my_phone` (Developer tools → Actions lists them). Settings:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Gear Selector | required | The selected vehicle's gear sensor; renamed entities work |
 | Look ahead | 3 h | How long before an event the trip is planned and sent early |
 | When to send | Early and just in time | Early loads it right away; just in time sends again at start − travel − buffer, so a trip loaded in between doesn't cost you the destination |
 | Traffic factor | 1.5 | Rivian's drive times are free-flow; used when Google isn't set up |
@@ -142,7 +141,8 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 | Include charging time | on | Counts the planner's charging stops |
 | Replace the current trip | on | Ends the loaded trip first instead of adding a stop |
 | Longest wait for Park | 2 h | Sends never happen while driving; this caps the wait |
-| Earliest send time | 06:00 | No sends before this time each day; skip sends delayed past the event start |
+| Earliest send time | 06:00 | No sends before this time each day |
+| Morning send, Morning send time | on, 06:00 | Also send the day's first event with a location at this time |
 | Skip events matching | `://` | Skips meeting links; a regular expression |
 
 **4. Optional: Google for traffic-aware drive times.** Rivian's planner doesn't know about traffic (home to Irvine reads 56 min at any time of day; Google says 2 h at 4:30 PM). Google's Routes API fixes that, at no cost for a few calls a day, but the setup has a few traps:
@@ -155,13 +155,13 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 
 "The Routes API is not enabled for this API key" almost always means the key and the enabled API are in different projects, the key has an application restriction, or it hasn't propagated yet.
 
-**What to expect.** Both blueprints skip sends if the event has started by the time Park is reached. Time to leave also rechecks quiet hours after waiting for Park and merges early/just-in-time sends that become due together. If Google returns no route or fails, it uses the Rivian estimate and traffic factor.
+**What to expect.** A send that is still waiting for Park when the event starts is skipped. Early and just-in-time sends that become due together are merged into one. If Google returns no route or fails, the Rivian estimate times the traffic factor is used.
 
 The notification reads like "Loaded: Dentist. 1 Main St, Burbank, CA. Leave by 8:38 AM (82 min with traffic)." A Home Assistant restart drops automation runs that are waiting, so an event inside the look-ahead window at restart time is only sent if the restart happens before its trigger. Deleting an event after it was sent doesn't clear the vehicle; the next send replaces it, or call `rivian.end_trip`.
 
 ### Example: leave on time for the next calendar event
 
-A minimal example using Rivian's free-flow estimate. Use the blueprints above for traffic estimates, quiet hours, and calendar ordering.
+A minimal example using Rivian's free-flow estimate. Use the blueprint above for traffic estimates, quiet hours, and calendar ordering.
 
 Three hours before each event with a location, plan the trip, wait until it's time to leave (trip time plus a buffer), then send the destination. Any calendar integration works (Google Calendar, CalDAV for iCloud, Remote Calendar for an ICS feed); add one trigger per calendar. The wait runs inside the automation, so a Home Assistant restart during those hours drops it.
 
@@ -192,18 +192,16 @@ automation:
           seconds: >-
             {{ [0, (as_datetime(trigger.calendar_event.start) - now()).total_seconds()
                    - plan.trip_seconds - buffer_minutes * 60] | max | int }}
-      # never replace a trip while driving: wait until the vehicle is parked
-      - wait_template: "{{ is_state('sensor.YOUR_VEHICLE_gear_selector', 'Park') }}"
-        timeout: "2:00:00"
-        continue_on_timeout: false
       - action: rivian.send_destination
         data:
           device_id: YOUR_VEHICLE_DEVICE_ID
           # the place plan_trip resolved, so the vehicle loads the trip that was planned
           location: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or location }}"
+          wait_for_park: true  # never replace a trip while driving
+          not_after: "{{ trigger.calendar_event.start }}"
 ```
 
-Trips longer than three hours need a longer trigger offset, or a once-a-day automation that runs `plan_trip` for the day's events and sends the first one early enough.
+Trips longer than three hours need a longer trigger offset, or the blueprint's morning send.
 
 Put the full street address in the event (including "Blvd", "St" and the city): the place search guesses when parts are missing, and a guess can land on the wrong side of town. The navigation actions work wherever the vehicle is; only the vehicle control entities are limited by the integration's zone setting.
 

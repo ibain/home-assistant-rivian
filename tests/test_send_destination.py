@@ -1,6 +1,7 @@
 """Tests for the send_destination and end_trip actions."""
 
 import asyncio
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -44,6 +45,7 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import entity_registry as er
 import homeassistant.helpers.device_registry as dr
+from homeassistant.util import dt as dt_util
 
 VEHICLE_ID = "01-123"
 USER_ID = "02-456"
@@ -237,11 +239,19 @@ def _setup_vehicle(
         identifiers={(DOMAIN, VIN), (DOMAIN, VEHICLE_ID)},
     )
     coordinator = MagicMock(vehicle_id=VEHICLE_ID, config_entry=entry)
-    coordinator.get = MagicMock(
-        side_effect=lambda key: {"powerState": power_state, "batteryLevel": 69.9}.get(
-            key
-        )
-    )
+    coordinator.state = {
+        "powerState": power_state,
+        "batteryLevel": 69.9,
+        "gearStatus": "park",
+    }
+    coordinator.get = MagicMock(side_effect=coordinator.state.get)
+    coordinator.listeners = []
+
+    def add_listener(update: Any) -> Any:
+        coordinator.listeners.append(update)
+        return lambda: coordinator.listeners.remove(update)
+
+    coordinator.async_add_listener = MagicMock(side_effect=add_listener)
     coordinator.data = {"gnssLocation": {"latitude": 34.181, "longitude": -118.327}}
     coordinator.send_vehicle_command = AsyncMock()
     coordinator._awake = asyncio.Event()
@@ -268,6 +278,13 @@ async def _call(hass: HomeAssistant, service: str, **data: Any) -> Any:
     )
 
 
+def _set_gear(coordinator: MagicMock, gear: str) -> None:
+    """Change the mocked vehicle's gear and notify coordinator listeners."""
+    coordinator.state["gearStatus"] = gear
+    for update in list(coordinator.listeners):
+        update()
+
+
 async def test_send_destination_replaces_trip(hass: HomeAssistant) -> None:
     """By default the current trip is ended before the destination is sent."""
     device, coordinator, api = _setup_vehicle(hass)
@@ -276,7 +293,7 @@ async def test_send_destination_replaces_trip(hass: HomeAssistant) -> None:
         hass, SERVICE_SEND_DESTINATION, device_id=device.id, location=LOCATION
     )
 
-    assert result == {"result": 0}
+    assert result == {"result": 0, "sent": True}
     assert _operations(api) == ["SendUpdatedTrip", "ParseAndShareLocationToVehicle"]
     end_trip, share = (c.args[2] for c in api._Rivian__graphql_query.call_args_list)
     assert end_trip["variables"]["vehicleId"] == VEHICLE_ID
@@ -345,7 +362,7 @@ async def test_send_destination_skips_wake(
         wake=wake,
     )
 
-    assert result == {"result": 0}
+    assert result == {"result": 0, "sent": True}
     coordinator.send_vehicle_command.assert_not_called()
     share = api._Rivian__graphql_query.call_args_list[-1].args[2]
     assert share["variables"]["requiresWakeup"] is wake
@@ -639,3 +656,94 @@ def test_end_trip_timestamp_milliseconds():
     ).timestamp
     assert timestamp.seconds == 1_760_000_123
     assert timestamp.nanos == 456_000_000
+
+
+async def test_send_destination_waits_for_park(hass: HomeAssistant) -> None:
+    """While driving, the send waits until the vehicle shifts into Park."""
+    device, coordinator, api = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+
+    task = asyncio.create_task(
+        _call(hass, SERVICE_SEND_DESTINATION, device_id=device.id, location=LOCATION)
+    )
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    api._Rivian__graphql_query.assert_not_awaited()
+    assert coordinator.listeners
+
+    _set_gear(coordinator, "park")
+    assert await asyncio.wait_for(task, 1) == {"result": 0, "sent": True}
+    assert coordinator.listeners == []
+
+
+async def test_send_destination_park_timeout(hass: HomeAssistant) -> None:
+    """Not parking within park_timeout is an error, and nothing is sent."""
+    device, coordinator, api = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+
+    with pytest.raises(HomeAssistantError, match="did not shift into Park"):
+        await _call(
+            hass,
+            SERVICE_SEND_DESTINATION,
+            device_id=device.id,
+            location=LOCATION,
+            park_timeout={"seconds": 0},
+        )
+    api._Rivian__graphql_query.assert_not_awaited()
+
+
+async def test_send_destination_without_park_wait(hass: HomeAssistant) -> None:
+    """wait_for_park: false sends while driving."""
+    device, coordinator, api = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+
+    result = await _call(
+        hass,
+        SERVICE_SEND_DESTINATION,
+        device_id=device.id,
+        location=LOCATION,
+        wait_for_park=False,
+    )
+
+    assert result == {"result": 0, "sent": True}
+    assert _operations(api) == ["SendUpdatedTrip", "ParseAndShareLocationToVehicle"]
+
+
+async def test_send_destination_not_after(hass: HomeAssistant) -> None:
+    """A deadline in the past skips the send without an error."""
+    device, _, api = _setup_vehicle(hass)
+
+    result = await _call(
+        hass,
+        SERVICE_SEND_DESTINATION,
+        device_id=device.id,
+        location=LOCATION,
+        not_after="2020-01-01T00:00:00+00:00",
+    )
+
+    assert result == {"result": None, "sent": False}
+    api._Rivian__graphql_query.assert_not_awaited()
+
+
+async def test_send_destination_not_after_checked_after_park(
+    hass: HomeAssistant,
+) -> None:
+    """A deadline that passes while waiting for Park skips the send."""
+    device, coordinator, api = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+    soon = (dt_util.utcnow() + timedelta(milliseconds=200)).isoformat()
+
+    task = asyncio.create_task(
+        _call(
+            hass,
+            SERVICE_SEND_DESTINATION,
+            device_id=device.id,
+            location=LOCATION,
+            not_after=soon,
+        )
+    )
+    await asyncio.sleep(0.3)
+    _set_gear(coordinator, "park")
+
+    assert await asyncio.wait_for(task, 1) == {"result": None, "sent": False}
+    api._Rivian__graphql_query.assert_not_awaited()
