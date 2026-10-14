@@ -178,7 +178,7 @@ actions:
   # Google's traffic-aware drive time, when a Google Travel Time entry is set
   - if:
       - condition: template
-        value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none }}"
+        value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none and plan.destination.address }}"
     then:
       - choose:
           - conditions: "{{ depart_time != '' }}"
@@ -187,8 +187,9 @@ actions:
                 continue_on_error: true
                 data:
                   config_entry_id: "{{ google_entry }}"
-                  origin: "{{ state_attr(tracker, 'latitude') }},{{ state_attr(tracker, 'longitude') }}"
-                  destination: "{{ plan.destination.latitude }},{{ plan.destination.longitude }}"
+                  # entity id and address: plain strings, so templating can't turn them into lists
+                  origin: "{{ tracker }}"
+                  destination: "{{ plan.destination.address }}"
                   traffic_model: best_guess
                   departure_time: "{{ depart_time }}"
                 response_variable: google
@@ -197,8 +198,8 @@ actions:
             continue_on_error: true
             data:
               config_entry_id: "{{ google_entry }}"
-              origin: "{{ state_attr(tracker, 'latitude') }},{{ state_attr(tracker, 'longitude') }}"
-              destination: "{{ plan.destination.latitude }},{{ plan.destination.longitude }}"
+              origin: "{{ tracker }}"
+              destination: "{{ plan.destination.address }}"
               traffic_model: best_guess
             response_variable: google
       - variables:
