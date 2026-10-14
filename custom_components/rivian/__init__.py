@@ -9,8 +9,8 @@ import shutil
 from rivian import Rivian
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.device_registry import DeviceEntry
@@ -55,31 +55,43 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Rivian actions and install the bundled blueprints."""
     async_setup_services(hass)
-    await hass.async_add_executor_job(
+    changed = await hass.async_add_executor_job(
         install_blueprints, Path(hass.config.path("blueprints", "automation", DOMAIN))
     )
+    if changed:
+        # Automations load before this runs, so ones built on an updated
+        # blueprint were validated against the old copy; load them again.
+        async def _reload_automations(_: Event) -> None:
+            await hass.services.async_call("automation", "reload")
+
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _reload_automations)
     return True
 
 
-def install_blueprints(target: Path) -> None:
+def install_blueprints(target: Path) -> bool:
     """Copy the bundled automation blueprints into the config's blueprint folder.
 
     Overwrites earlier copies so updates reach users and removes blueprints no
     longer shipped; a customized copy should live under a different folder name.
+    Returns True if anything was written or removed.
     """
     source = Path(__file__).parent / "blueprints"
+    changed = False
     try:
         target.mkdir(parents=True, exist_ok=True)
         bundled = {blueprint.name for blueprint in source.glob("*.yaml")}
         for stale in target.glob("*.yaml"):
             if stale.name not in bundled:
                 stale.unlink()
+                changed = True
         for name in bundled:
             blueprint, dest = source / name, target / name
             if not dest.exists() or dest.read_bytes() != blueprint.read_bytes():
                 shutil.copyfile(blueprint, dest)
+                changed = True
     except OSError as err:
         _LOGGER.warning("Could not install blueprints into %s: %s", target, err)
+    return changed
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
