@@ -11,8 +11,9 @@ from pytest_homeassistant_custom_component.common import (
 )
 import yaml
 
-from custom_components.rivian import install_blueprints
+from custom_components.rivian import async_setup, install_blueprints
 from homeassistant.components.blueprint.schemas import BLUEPRINT_SCHEMA
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import Context, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
@@ -49,15 +50,16 @@ def test_install_blueprints_copies_updates_and_prunes(tmp_path: Path) -> None:
     """Blueprints are copied on first run, refreshed when changed, stale ones removed."""
     target = tmp_path / "blueprints" / "automation" / "rivian"
 
-    install_blueprints(target)
+    assert install_blueprints(target) is True
 
     assert [p.name for p in target.glob("*.yaml")] == [BLUEPRINT]
+    assert install_blueprints(target) is False  # nothing to do the second time
     stale = target / BLUEPRINT
     stale.write_text("old")
     retired = target / "first_event_of_day.yaml"
     retired.write_text("no longer shipped")
 
-    install_blueprints(target)
+    assert install_blueprints(target) is True
 
     assert stale.read_text() == (BLUEPRINTS / BLUEPRINT).read_text()
     assert not retired.exists()
@@ -356,3 +358,21 @@ async def test_both_sends_run_at_distinct_deadlines(hass, navigation, freezer):
     await task
     assert len(navigation["sent"]) == 2
     assert navigation["notifications"][1]["title"] == "Time to leave: Dentist"
+
+
+async def test_setup_reloads_automations_after_a_blueprint_change(hass, tmp_path):
+    """A changed blueprint triggers one automation reload once HA has started."""
+    hass.config.config_dir = str(tmp_path)
+    reloads = []
+    hass.services.async_register("automation", "reload", lambda call: reloads.append(1))
+
+    assert await async_setup(hass, {})
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
+    assert reloads == [1]
+
+    # unchanged blueprint on the next start: no reload
+    assert await async_setup(hass, {})
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
+    assert reloads == [1]
