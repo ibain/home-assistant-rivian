@@ -178,7 +178,7 @@ actions:
   # Google's traffic-aware drive time, when a Google Travel Time entry is set
   - if:
       - condition: template
-        value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none and plan.destination.address }}"
+        value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none and (plan.destination.address | default('', true)) != '' }}"
     then:
       - choose:
           - conditions: "{{ depart_time != '' }}"
