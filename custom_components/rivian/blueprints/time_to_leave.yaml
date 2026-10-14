@@ -15,12 +15,8 @@ blueprint:
         device:
           integration: rivian
     gear_sensor:
-      name: Gear Selector (optional)
-      description: >-
-        The selected vehicle's Gear Selector sensor; sends wait for it to read Park.
-        Leave empty to use the vehicle's own gear sensor automatically; pick it only
-        if you renamed that entity.
-      default: ""
+      name: Gear Selector
+      description: The selected vehicle's Gear Selector sensor. Sends wait for Park.
       selector:
         entity:
           domain: sensor
@@ -141,9 +137,7 @@ triggers:
 
 variables:
   vehicle: !input vehicle
-  gear_input: !input gear_sensor
-  gear_sensor: >-
-    {{ gear_input or (device_entities(vehicle) | select('search', 'gear_selector') | first | default('')) }}
+  gear_sensor: !input gear_sensor
   calendars: !input calendars
   send_mode: !input send_mode
   traffic_factor: !input traffic_factor

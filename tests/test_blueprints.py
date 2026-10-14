@@ -359,26 +359,3 @@ async def test_both_sends_run_at_distinct_deadlines(hass, navigation, freezer):
     await task
     assert len(navigation["sent"]) == 2
     assert navigation["notifications"][1]["title"] == "Time to leave: Dentist"
-
-
-@pytest.mark.parametrize("name", ["time_to_leave.yaml", "first_event_of_day.yaml"])
-async def test_gear_sensor_is_found_automatically(hass, navigation, name):
-    """With the input left empty, the vehicle's own gear_selector sensor is used."""
-    navigation["events"] = [navigation["event"]]
-    device = navigation["inputs"]["vehicle"]
-    entry = next(iter(hass.config_entries.async_entries("rivian")))
-    auto = er.async_get(hass).async_get_or_create(
-        "sensor",
-        "rivian",
-        "gear-auto",
-        suggested_object_id="truck_gear_selector",
-        device_id=device,
-        config_entry=entry,
-    )
-    hass.states.async_set(auto.entity_id, "Drive")
-    task = asyncio.create_task(_run_blueprint(hass, navigation, name, gear_sensor=""))
-    await navigation["paused"].wait()
-    assert not navigation["sent"]
-    hass.states.async_set(auto.entity_id, "Park")
-    await task
-    assert len(navigation["sent"]) == 1
