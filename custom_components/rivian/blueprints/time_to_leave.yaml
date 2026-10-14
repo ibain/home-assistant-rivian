@@ -14,6 +14,17 @@ blueprint:
       selector:
         device:
           integration: rivian
+    gear_sensor:
+      name: Gear Selector (optional)
+      description: >-
+        The selected vehicle's Gear Selector sensor; sends wait for it to read Park.
+        Leave empty to use the vehicle's own gear sensor automatically; pick it only
+        if you renamed that entity.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          integration: rivian
     calendars:
       name: Calendars
       description: Events with a location on these calendars are sent to the vehicle.
@@ -96,7 +107,7 @@ blueprint:
         duration: {}
     earliest_time:
       name: Earliest send time
-      description: Never send before this time of day.
+      description: Never send before this time of day. Skip sends delayed past the event start.
       default: "06:00:00"
       selector:
         time: {}
@@ -130,6 +141,9 @@ triggers:
 
 variables:
   vehicle: !input vehicle
+  gear_input: !input gear_sensor
+  gear_sensor: >-
+    {{ gear_input or (device_entities(vehicle) | select('search', 'gear_selector') | first | default('')) }}
   calendars: !input calendars
   send_mode: !input send_mode
   traffic_factor: !input traffic_factor
@@ -145,10 +159,10 @@ variables:
   location: >-
     {{ trigger.calendar_event.location | default('', true)
        | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
-  gear_sensor: >-
-    {{ device_entities(vehicle) | select('search', 'gear_selector') | first | default('') }}
 
 conditions:
+  - condition: template
+    value_template: "{{ gear_sensor != '' and gear_sensor in device_entities(vehicle) }}"
   - condition: template
     value_template: >-
       {{ location != '' and 'T' in start
@@ -169,7 +183,7 @@ actions:
       end_date_time: "{{ (as_datetime(start) - timedelta(seconds=1)).isoformat() }}"
     response_variable: upcoming
   - variables:
-      tracker: "{{ device_entities(vehicle) | select('search', '^device_tracker\\.') | first | default('') }}"
+      tracker: "{{ device_entities(vehicle) | select('search', '^device_tracker[.]') | first | default('') }}"
       estimated_drive: "{{ (plan.drive_seconds * traffic_factor) | int }}"
       depart_time: >-
         {% set t = as_datetime(start) | as_local - timedelta(seconds=estimated_drive) %}
@@ -180,44 +194,33 @@ actions:
       - condition: template
         value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none and (plan.destination.address | default('', true)) != '' }}"
     then:
-      - choose:
-          - conditions: "{{ depart_time != '' }}"
-            sequence:
-              - action: google_travel_time.get_travel_times
-                continue_on_error: true
-                data:
-                  config_entry_id: "{{ google_entry }}"
-                  # entity id and address: plain strings, so templating can't turn them into lists
-                  origin: "{{ tracker }}"
-                  destination: "{{ plan.destination.address }}"
-                  traffic_model: best_guess
-                  departure_time: "{{ depart_time }}"
-                response_variable: google
-        default:
-          - action: google_travel_time.get_travel_times
-            continue_on_error: true
-            data:
-              config_entry_id: "{{ google_entry }}"
-              origin: "{{ tracker }}"
-              destination: "{{ plan.destination.address }}"
-              traffic_model: best_guess
-            response_variable: google
+      - action: google_travel_time.get_travel_times
+        continue_on_error: true
+        # Render one mapping so entity IDs and addresses remain strings.
+        data: >-
+          {% set data = dict(config_entry_id=google_entry, origin=tracker,
+                             destination=plan.destination.address, traffic_model='best_guess') %}
+          {{ dict(data, departure_time=depart_time) if depart_time != '' else data }}
+        response_variable: google
       - variables:
-          google_seconds: "{{ (google.routes[0].duration | default(0)) if google is defined else 0 }}"
+          google_seconds: >-
+            {{ google.routes[0].duration | default(0, true)
+               if google is defined and (google.routes | default([], true)) else 0 }}
   - variables:
       travel_seconds: >-
         {{ ((google_seconds if google_seconds | int > 0 else estimated_drive) + (plan.charge_seconds if include_charging else 0)) | int }}
       destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or location }}"
-      leave_by: "{{ (as_datetime(start) - timedelta(seconds=travel_seconds)) | as_local }}"
+      leave_by: "{{ (as_datetime(start) - timedelta(seconds=travel_seconds + buffer_minutes * 60)) | as_local }}"
+      early_at: "{{ [now(), today_at(earliest_time)] | max | string }}"
       send_at: >-
-        {% set t = as_datetime(start) | as_local - timedelta(seconds=travel_seconds + buffer_minutes * 60) %}
-        {% set earliest = today_at(earliest_time) %}
-        {{ (earliest if (t < earliest and earliest < as_datetime(start) | as_local) else t).isoformat() }}
+        {% set t = [as_datetime(leave_by), now()] | max %}
+        {% set earliest = today_at(earliest_time).replace(year=t.year, month=t.month, day=t.day) %}
+        {{ [t, earliest] | max | string }}
       is_next: >-
         {% set ns = namespace(n=0) %}
         {% for ev in upcoming.values() | map(attribute='events') | sum(start=[]) %}
           {% set loc = ev.location | default('', true) %}
-          {% if loc != '' and 'T' in ev.start and ev.start < start
+          {% if loc != '' and 'T' in ev.start and as_timestamp(ev.start) < as_timestamp(start)
                 and not (skip_pattern and (loc is search(skip_pattern) or (ev.summary | default('', true)) is search(skip_pattern))) %}
             {% set ns.n = ns.n + 1 %}
           {% endif %}
@@ -227,57 +230,50 @@ actions:
         {{ destination }}. Leave by {{ leave_by | as_timestamp | timestamp_custom('%-I:%M %p') }}
         ({{ (travel_seconds / 60) | round | int }} min{{ ' with traffic' if google_seconds | int > 0 else ' est.' }}
         {%- if plan.charge_seconds and include_charging %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
-  # early send: only when nothing with a location comes first
-  - if:
-      - condition: template
-        value_template: "{{ send_mode != 'just_in_time' and is_next }}"
-    then:
-      - delay:
-          seconds: "{{ [0, (today_at(earliest_time) - now()).total_seconds()] | max | int }}"
-      - if:
-          - condition: template
-            value_template: "{{ gear_sensor != '' }}"
-        then:
-          - wait_template: "{{ is_state(gear_sensor, 'Park') }}"
-            timeout: !input max_park_wait
-            continue_on_timeout: false
-      - action: rivian.send_destination
-        data:
-          device_id: !input vehicle
-          location: "{{ destination }}"
-          replace: "{{ replace }}"
-      - if:
-          - condition: template
-            value_template: "{{ notify_service != '' }}"
-        then:
-          - action: "{{ notify_service }}"
-            data:
-              title: "Loaded: {{ title }}"
-              message: "{{ summary }}"
-  # just in time: send (again) when it's time to leave, once parked
-  - if:
-      - condition: template
-        value_template: "{{ send_mode != 'early' }}"
-    then:
-      - delay:
-          seconds: "{{ [0, (as_datetime(send_at) - now()).total_seconds()] | max | int }}"
-      - if:
-          - condition: template
-            value_template: "{{ gear_sensor != '' }}"
-        then:
-          - wait_template: "{{ is_state(gear_sensor, 'Park') }}"
-            timeout: !input max_park_wait
-            continue_on_timeout: false
-      - action: rivian.send_destination
-        data:
-          device_id: !input vehicle
-          location: "{{ destination }}"
-          replace: "{{ replace }}"
-      - if:
-          - condition: template
-            value_template: "{{ notify_service != '' }}"
-        then:
-          - action: "{{ notify_service }}"
-            data:
-              title: "Time to leave: {{ title }}"
-              message: "{{ summary }}"
+  # One send sequence for both phases; merge phases that become due together.
+  - variables:
+      last_sent: 0
+      sends: >-
+        {% set ns = namespace(items=[]) %}
+        {% if send_mode != 'just_in_time' and is_next
+              and (send_mode == 'early' or as_timestamp(early_at) < as_timestamp(send_at)) %}
+          {% set ns.items = ns.items + [dict(at=early_at, title='Loaded: ' ~ title)] %}
+        {% endif %}
+        {% if send_mode != 'early' %}
+          {% set ns.items = ns.items + [dict(at=send_at, title='Time to leave: ' ~ title)] %}
+        {% endif %}
+        {{ ns.items }}
+  - repeat:
+      for_each: "{{ sends }}"
+      sequence:
+        - if:
+            - condition: template
+              value_template: >-
+                {{ as_timestamp(repeat.item.at) > last_sent
+                   and as_timestamp(repeat.item.at) < as_timestamp(start) }}
+          then:
+            - delay:
+                seconds: "{{ [0, as_timestamp(repeat.item.at) - as_timestamp(now())] | max }}"
+            - wait_template: "{{ is_state(gear_sensor, 'Park') }}"
+              timeout: !input max_park_wait
+              continue_on_timeout: false
+            # Park may arrive after midnight or after the event has started.
+            - if:
+                - condition: template
+                  value_template: "{{ today_at(earliest_time) <= now() and as_timestamp(now()) < as_timestamp(start) }}"
+              then:
+                - action: rivian.send_destination
+                  data:
+                    device_id: !input vehicle
+                    location: "{{ destination }}"
+                    replace: "{{ replace }}"
+                - variables:
+                    last_sent: "{{ as_timestamp(now()) }}"
+                - if:
+                    - condition: template
+                      value_template: "{{ notify_service != '' }}"
+                  then:
+                    - action: "{{ notify_service }}"
+                      data:
+                        title: "{{ repeat.item.title }}"
+                        message: "{{ summary }}"
