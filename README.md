@@ -127,13 +127,13 @@ You need: Home Assistant 2026.8 or newer, this integration 1.5.9 or newer, a cal
 
 **2. Find the blueprints.** The integration installs them on startup (1.5.10 and newer) under Settings → Automations & scenes → **Blueprints**, named "Rivian: send calendar events to the vehicle when it's time to leave" and "Rivian: send the day's first event to the vehicle each morning". Updates to the integration refresh them; to customize one, copy it under another folder name in `config/blueprints/automation/`. On older versions, import them from `custom_components/rivian/blueprints/` in this repository.
 
-**3. Create the automations.** On each blueprint, Create automation. Pick the vehicle and your calendars; the defaults work as they are. Sends wait for the vehicle's Gear Selector sensor to read Park; it's found automatically, so only pick it in the Gear Selector field if you renamed that entity.
+**3. Create the automations.** On each blueprint, Create automation. Pick the vehicle, its **Gear Selector** sensor, and your calendars; the other defaults work as they are. Sends wait for that sensor to read Park, and it must belong to the selected vehicle. If you created automations from a version before 1.5.14, edit each one and select its Gear Selector; the input is required.
 
 For notifications, type your phone's notify action, for example `notify.mobile_app_my_phone` (Developer tools → Actions lists them). Settings on "Time to leave":
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Gear Selector | auto | The vehicle's gear sensor, found automatically; set it only if you renamed the entity |
+| Gear Selector | required | The selected vehicle's gear sensor; renamed entities work |
 | Look ahead | 3 h | How long before an event the trip is planned and sent early |
 | When to send | Early and just in time | Early loads it right away; just in time sends again at start − travel − buffer, so a trip loaded in between doesn't cost you the destination |
 | Traffic factor | 1.5 | Rivian's drive times are free-flow; used when Google isn't set up |
