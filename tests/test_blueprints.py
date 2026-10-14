@@ -1,4 +1,4 @@
-"""Tests for the bundled blueprints."""
+"""Tests for the bundled blueprint."""
 
 import asyncio
 from pathlib import Path
@@ -24,6 +24,7 @@ from homeassistant.helpers.script import Script
 from homeassistant.util import dt as dt_util
 
 BLUEPRINTS = Path(__file__).parents[1] / "custom_components" / "rivian" / "blueprints"
+BLUEPRINT = "time_to_leave.yaml"
 
 
 class _Loader(yaml.SafeLoader):
@@ -33,31 +34,33 @@ class _Loader(yaml.SafeLoader):
 _Loader.add_constructor("!input", lambda loader, node: {"input": node.value})
 
 
-def test_blueprints_are_valid_automation_blueprints() -> None:
-    """Each bundled file parses and declares an automation blueprint with inputs."""
-    files = sorted(BLUEPRINTS.glob("*.yaml"))
-    assert [f.name for f in files] == ["first_event_of_day.yaml", "time_to_leave.yaml"]
-    for file in files:
-        data = BLUEPRINT_SCHEMA(yaml.load(file.read_text(), Loader=_Loader))
-        assert data["blueprint"]["domain"] == "automation"
-        assert {"vehicle", "calendars"} <= data["blueprint"]["input"].keys()
-        assert data["triggers"] and data["actions"]
+def test_blueprint_is_a_valid_automation_blueprint() -> None:
+    """The bundled file parses and declares an automation blueprint with inputs."""
+    assert [f.name for f in sorted(BLUEPRINTS.glob("*.yaml"))] == [BLUEPRINT]
+    data = BLUEPRINT_SCHEMA(
+        yaml.load((BLUEPRINTS / BLUEPRINT).read_text(), Loader=_Loader)
+    )
+    assert data["blueprint"]["domain"] == "automation"
+    assert {"vehicle", "calendars", "morning_time"} <= data["blueprint"]["input"].keys()
+    assert [t["id"] for t in data["triggers"]] == ["event", "morning"]
 
 
-def test_install_blueprints_copies_and_updates(tmp_path: Path) -> None:
-    """Blueprints are copied on first run and refreshed when they change."""
+def test_install_blueprints_copies_updates_and_prunes(tmp_path: Path) -> None:
+    """Blueprints are copied on first run, refreshed when changed, stale ones removed."""
     target = tmp_path / "blueprints" / "automation" / "rivian"
 
     install_blueprints(target)
 
-    names = sorted(p.name for p in target.glob("*.yaml"))
-    assert names == ["first_event_of_day.yaml", "time_to_leave.yaml"]
-    stale = target / "time_to_leave.yaml"
+    assert [p.name for p in target.glob("*.yaml")] == [BLUEPRINT]
+    stale = target / BLUEPRINT
     stale.write_text("old")
+    retired = target / "first_event_of_day.yaml"
+    retired.write_text("no longer shipped")
 
     install_blueprints(target)
 
-    assert stale.read_text() == (BLUEPRINTS / "time_to_leave.yaml").read_text()
+    assert stale.read_text() == (BLUEPRINTS / BLUEPRINT).read_text()
+    assert not retired.exists()
 
 
 def test_install_blueprints_tolerates_unwritable_target(tmp_path: Path) -> None:
@@ -68,9 +71,9 @@ def test_install_blueprints_tolerates_unwritable_target(tmp_path: Path) -> None:
     install_blueprints(blocked / "blueprints")  # mkdir fails: parent is a file
 
 
-def _load_blueprint(name, inputs):
+def _load_blueprint(inputs):
     """Substitute inputs, including defaults, as HA does before script validation."""
-    data = yaml.load((BLUEPRINTS / name).read_text(), Loader=_Loader)
+    data = yaml.load((BLUEPRINTS / BLUEPRINT).read_text(), Loader=_Loader)
     values = {
         key: value["default"]
         for key, value in data["blueprint"]["input"].items()
@@ -92,7 +95,7 @@ def _load_blueprint(name, inputs):
 
 @pytest.fixture
 async def navigation(hass, freezer):
-    """Run real HA actions against local calendar, planner, and notifier mocks."""
+    """Run the blueprint's actions against local calendar, planner, and send mocks."""
     dt_util.set_default_time_zone(ZoneInfo("America/Los_Angeles"))
     freezer.move_to("2026-10-15T15:00:00+00:00")  # 08:00 local
     entry = MockConfigEntry(domain="rivian")
@@ -100,25 +103,15 @@ async def navigation(hass, freezer):
     device = dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id, identifiers={("rivian", "vehicle")}
     )
-    gear = er.async_get(hass).async_get_or_create(
-        "sensor",
-        "rivian",
-        "gear",
-        suggested_object_id="renamed_gear",
-        device_id=device.id,
-        config_entry=entry,
-    )
     tracker = er.async_get(hass).async_get_or_create(
         "device_tracker", "rivian", "gps", device_id=device.id, config_entry=entry
     )
-    hass.states.async_set(gear.entity_id, "Park")
     hass.states.async_set(
         tracker.entity_id, "not_home", {"latitude": 34, "longitude": -119}
     )
     data = {
         "inputs": {
             "vehicle": device.id,
-            "gear_sensor": gear.entity_id,
             "calendars": ["calendar.test"],
             "notify_service": "notify.test",
             "send_mode": "early",
@@ -130,10 +123,13 @@ async def navigation(hass, freezer):
         },
         "events": [],
         "sent": [],
+        "send_result": {"result": 0, "sent": True},
+        "release": None,  # an Event makes the send action block until it is set
+        "send_started": asyncio.Event(),
         "notifications": [],
         "google_calls": [],
         "paused": asyncio.Event(),
-        "pause_at": "wait template",
+        "pause_at": "delay",
         "plan": {
             "drive_seconds": 1200,
             "charge_seconds": 600,
@@ -156,30 +152,30 @@ async def navigation(hass, freezer):
 
     async def send(call):
         data["sent"].append(dict(call.data))
+        data["send_started"].set()
+        if data["release"] is not None:
+            await data["release"].wait()
+        return data["send_result"]
 
     async def notify(call):
         data["notifications"].append(dict(call.data))
 
-    for domain, action, handler in [
-        ("calendar", "get_events", calendar),
-        ("rivian", "plan_trip", plan),
-        ("google_travel_time", "get_travel_times", google),
+    for domain, action, handler, response in [
+        ("calendar", "get_events", calendar, SupportsResponse.ONLY),
+        ("rivian", "plan_trip", plan, SupportsResponse.ONLY),
+        ("google_travel_time", "get_travel_times", google, SupportsResponse.ONLY),
+        ("rivian", "send_destination", send, SupportsResponse.OPTIONAL),
     ]:
         hass.services.async_register(
-            domain, action, handler, supports_response=SupportsResponse.ONLY
+            domain, action, handler, supports_response=response
         )
-    hass.services.async_register("rivian", "send_destination", send)
     hass.services.async_register("notify", "test", notify)
     return data
 
 
-async def _run_blueprint(hass, navigation, name="time_to_leave.yaml", **inputs):
-    data = _load_blueprint(name, navigation["inputs"] | inputs)
-    sequence = [
-        {"variables": data["variables"]},
-        *data.get("conditions", []),
-        *data["actions"],
-    ]
+async def _run_blueprint(hass, navigation, trigger_id="event", **inputs):
+    data = _load_blueprint(navigation["inputs"] | inputs)
+    sequence = [{"variables": data["variables"]}, *data["actions"]]
 
     @callback
     def changed():
@@ -197,9 +193,10 @@ async def _run_blueprint(hass, navigation, name="time_to_leave.yaml", **inputs):
         "automation",
         change_listener=changed,
     )
-    return await script.async_run(
-        {"trigger": {"calendar_event": navigation["event"]}}, context=Context()
-    )
+    trigger = {"id": trigger_id}
+    if trigger_id == "event":
+        trigger["calendar_event"] = navigation["event"]
+    return await script.async_run({"trigger": trigger}, context=Context())
 
 
 @pytest.mark.parametrize(
@@ -233,35 +230,37 @@ async def test_google_omits_past_departure(hass, navigation):
     assert len(navigation["sent"]) == 1
 
 
-@pytest.mark.parametrize("name", ["time_to_leave.yaml", "first_event_of_day.yaml"])
-@pytest.mark.parametrize("gear", ["Drive", "unknown", "unavailable"])
-async def test_blueprints_wait_for_park(hass, navigation, name, gear):
-    """Both flows refuse to send without positive Park confirmation."""
-    navigation["events"] = [navigation["event"]]
-    hass.states.async_set(navigation["inputs"]["gear_sensor"], gear)
-    await _run_blueprint(hass, navigation, name, max_park_wait={"seconds": 0})
-    assert navigation["sent"] == []
+async def test_event_send_waits_for_park_inside_the_action(hass, navigation):
+    """The park wait and the event-start deadline are delegated to send_destination."""
+    await _run_blueprint(hass, navigation)
+    (call,) = navigation["sent"]
+    assert call["wait_for_park"] is True
+    assert call["park_timeout"] == {"hours": 2}
+    assert call["not_after"] == navigation["event"]["start"]
+    assert call["replace"] is True
 
 
-@pytest.mark.parametrize("name", ["time_to_leave.yaml", "first_event_of_day.yaml"])
-async def test_blueprints_send_after_park(hass, navigation, name):
-    """Renamed sensors work and a live transition to Park releases the wait."""
+async def test_morning_send_waits_for_park_inside_the_action(hass, navigation):
     navigation["events"] = [navigation["event"]]
-    sensor = navigation["inputs"]["gear_sensor"]
-    hass.states.async_set(sensor, "Drive")
-    task = asyncio.create_task(_run_blueprint(hass, navigation, name))
-    await navigation["paused"].wait()
-    assert not navigation["sent"]
-    hass.states.async_set(sensor, "Park")
-    await task
+    await _run_blueprint(hass, navigation, "morning")
+    (call,) = navigation["sent"]
+    assert call["wait_for_park"] is True
+    assert call["park_timeout"] == {"hours": 2}
+    assert call["not_after"] == navigation["event"]["start"]
+    assert navigation["notifications"][0]["title"] == "Loaded: Dentist"
+
+
+async def test_skipped_send_is_not_notified(hass, navigation):
+    """send_destination reporting sent: false (deadline passed) means no notification."""
+    navigation["send_result"] = {"result": None, "sent": False}
+    await _run_blueprint(hass, navigation)
     assert len(navigation["sent"]) == 1
+    assert navigation["notifications"] == []
 
 
-@pytest.mark.parametrize("name", ["time_to_leave.yaml", "first_event_of_day.yaml"])
-async def test_wrong_vehicle_gear_sensor_is_rejected(hass, navigation, name):
-    navigation["events"] = [navigation["event"]]
-    hass.states.async_set("sensor.some_other_gear", "Park")
-    await _run_blueprint(hass, navigation, name, gear_sensor="sensor.some_other_gear")
+async def test_event_without_location_is_skipped(hass, navigation):
+    navigation["event"]["location"] = ""
+    await _run_blueprint(hass, navigation)
     assert not navigation["sent"]
 
 
@@ -275,14 +274,24 @@ async def test_morning_orders_instants_and_hides_excluded_charging(hass, navigat
             "location": "2 Main St",
         },
     ]
-    await _run_blueprint(
-        hass, navigation, "first_event_of_day.yaml", include_charging=False
-    )
+    await _run_blueprint(hass, navigation, "morning", include_charging=False)
     assert len(navigation["sent"]) == 1
     notification = navigation["notifications"][0]
     assert "Earlier" in notification["title"]
     assert "7:45 AM" in notification["message"]
     assert "charging" not in notification["message"]
+
+
+async def test_morning_send_can_be_turned_off(hass, navigation):
+    navigation["events"] = [navigation["event"]]
+    await _run_blueprint(hass, navigation, "morning", morning_send=False)
+    assert not navigation["sent"]
+
+
+async def test_morning_without_located_events_sends_nothing(hass, navigation):
+    navigation["events"] = [{"start": "2026-10-15T09:00:00-07:00", "summary": "Call"}]
+    await _run_blueprint(hass, navigation, "morning")
+    assert not navigation["sent"]
 
 
 async def test_earlier_event_blocks_early_send_across_offsets(hass, navigation):
@@ -308,7 +317,6 @@ async def test_sends_respect_quiet_hours(hass, navigation, freezer, send_mode):
 async def test_cross_midnight_just_in_time_waits_until_six(hass, navigation, freezer):
     freezer.move_to("2026-10-15T06:00:00+00:00")  # Previous day, 23:00
     navigation["event"]["start"] = "2026-10-15T06:30:00-07:00"
-    navigation["pause_at"] = "delay"
     task = asyncio.create_task(
         _run_blueprint(hass, navigation, send_mode="just_in_time")
     )
@@ -323,33 +331,22 @@ async def test_cross_midnight_just_in_time_waits_until_six(hass, navigation, fre
     assert len(navigation["sent"]) == 1
 
 
-async def test_both_sends_collapse_when_park_arrives_late(hass, navigation, freezer):
-    sensor = navigation["inputs"]["gear_sensor"]
-    hass.states.async_set(sensor, "Drive")
+async def test_both_sends_collapse_when_the_first_is_held(hass, navigation, freezer):
+    """If the early send only completes (parked) after the just-in-time point, one send."""
+    navigation["release"] = asyncio.Event()
     task = asyncio.create_task(_run_blueprint(hass, navigation, send_mode="both"))
-    await navigation["paused"].wait()
+    await asyncio.wait_for(navigation["send_started"].wait(), 1)
+    assert len(navigation["sent"]) == 1
     freezer.move_to("2026-10-15T15:25:00+00:00")  # Past buffered departure at 08:05
     async_fire_time_changed(hass)
-    hass.states.async_set(sensor, "Park")
+    navigation["release"].set()
     await task
     assert len(navigation["sent"]) == 1
-
-
-async def test_park_after_event_start_does_not_send(hass, navigation, freezer):
-    sensor = navigation["inputs"]["gear_sensor"]
-    hass.states.async_set(sensor, "Drive")
-    task = asyncio.create_task(_run_blueprint(hass, navigation))
-    await navigation["paused"].wait()
-    freezer.move_to("2026-10-15T16:01:00+00:00")
-    async_fire_time_changed(hass)
-    hass.states.async_set(sensor, "Park")
-    await task
-    assert not navigation["sent"]
+    assert navigation["notifications"][0]["title"] == "Loaded: Dentist"
 
 
 async def test_both_sends_run_at_distinct_deadlines(hass, navigation, freezer):
     """Consolidating the send steps must preserve both phases when they are distinct."""
-    navigation["pause_at"] = "delay"
     task = asyncio.create_task(_run_blueprint(hass, navigation, send_mode="both"))
     await navigation["paused"].wait()
     assert len(navigation["sent"]) == 1

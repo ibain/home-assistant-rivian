@@ -64,14 +64,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 def install_blueprints(target: Path) -> None:
     """Copy the bundled automation blueprints into the config's blueprint folder.
 
-    Overwrites earlier copies so updates reach users; a customized copy should
-    live under a different folder name.
+    Overwrites earlier copies so updates reach users and removes blueprints no
+    longer shipped; a customized copy should live under a different folder name.
     """
     source = Path(__file__).parent / "blueprints"
     try:
         target.mkdir(parents=True, exist_ok=True)
-        for blueprint in source.glob("*.yaml"):
-            dest = target / blueprint.name
+        bundled = {blueprint.name for blueprint in source.glob("*.yaml")}
+        for stale in target.glob("*.yaml"):
+            if stale.name not in bundled:
+                stale.unlink()
+        for name in bundled:
+            blueprint, dest = source / name, target / name
             if not dest.exists() or dest.read_bytes() != blueprint.read_bytes():
                 shutil.copyfile(blueprint, dest)
     except OSError as err:

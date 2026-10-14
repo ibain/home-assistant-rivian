@@ -110,6 +110,18 @@
         "replace": {
           "name": "Replace current trip",
           "description": "End the vehicle's current trip first, so the destination doesn't get added as an extra stop."
+        },
+        "wait_for_park": {
+          "name": "Wait until parked",
+          "description": "Wait for the vehicle to be in Park before sending, so a trip being driven is never replaced."
+        },
+        "park_timeout": {
+          "name": "Longest wait for Park",
+          "description": "Give up (with an error) if the vehicle isn't in Park within this time."
+        },
+        "not_after": {
+          "name": "Not after",
+          "description": "Skip the send (without an error) if this time has passed, for example the event's start."
         }
       }
     },
