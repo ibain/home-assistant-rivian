@@ -9,6 +9,7 @@ from rivian import Rivian, VehicleCommand
 from rivian.exceptions import RivianApiException
 import voluptuous as vol
 
+from homeassistant.auth.permissions.const import POLICY_CONTROL, POLICY_READ
 from homeassistant.const import ATTR_DEVICE_ID
 from homeassistant.core import (
     HomeAssistant,
@@ -17,8 +18,17 @@ from homeassistant.core import (
     SupportsResponse,
     callback,
 )
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceValidationError,
+    Unauthorized,
+    UnknownUser,
+)
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
 
 from .api_ext import (
     async_end_trip,
@@ -69,26 +79,34 @@ PLAN_TRIP_SCHEMA = vol.Schema(
 @callback
 def async_setup_services(hass: HomeAssistant) -> None:
     """Register the Rivian actions."""
+    navigation_locks: dict[str, asyncio.Lock] = {}
 
     async def async_send_destination(call: ServiceCall) -> ServiceResponse:
-        coordinator, api = _get_vehicle(hass, call.data[ATTR_DEVICE_ID])
-        if call.data[ATTR_WAKE]:
-            await _async_wake(hass, coordinator)
-        if call.data[ATTR_REPLACE]:
-            # Otherwise the destination is added as a stop ahead of any open trip.
-            await async_end_trip(
-                api, coordinator.vehicle_id, _user_id(hass, coordinator)
+        coordinator, api = await _async_get_vehicle(hass, call, POLICY_CONTROL)
+        async with navigation_locks.setdefault(coordinator.vehicle_id, asyncio.Lock()):
+            if call.data[ATTR_WAKE]:
+                await _async_wake(hass, coordinator)
+            if call.data[ATTR_REPLACE]:
+                # Keep clearing and sharing together when automations overlap.
+                cleared = await async_end_trip(
+                    api, coordinator.vehicle_id, _user_id(hass, coordinator)
+                )
+                if cleared["success"] is not True:
+                    raise HomeAssistantError("Rivian could not clear the current trip")
+            result = await async_share_location(
+                api,
+                coordinator.vehicle_id,
+                call.data[ATTR_LOCATION],
+                call.data[ATTR_WAKE],
             )
-        result = await async_share_location(
-            api, coordinator.vehicle_id, call.data[ATTR_LOCATION], call.data[ATTR_WAKE]
-        )
         return {"result": result}
 
     async def async_end_trip_service(call: ServiceCall) -> ServiceResponse:
-        coordinator, api = _get_vehicle(hass, call.data[ATTR_DEVICE_ID])
-        return await async_end_trip(
-            api, coordinator.vehicle_id, _user_id(hass, coordinator)
-        )
+        coordinator, api = await _async_get_vehicle(hass, call, POLICY_CONTROL)
+        async with navigation_locks.setdefault(coordinator.vehicle_id, asyncio.Lock()):
+            return await async_end_trip(
+                api, coordinator.vehicle_id, _user_id(hass, coordinator)
+            )
 
     hass.services.async_register(
         DOMAIN,
@@ -99,7 +117,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
     )
 
     async def async_plan_trip_service(call: ServiceCall) -> ServiceResponse:
-        coordinator, api = _get_vehicle(hass, call.data[ATTR_DEVICE_ID])
+        coordinator, api = await _async_get_vehicle(hass, call, POLICY_READ)
         location = (coordinator.data or {}).get("gnssLocation") or {}
         if location.get("latitude") is None:
             raise HomeAssistantError("The vehicle's location is not known yet")
@@ -154,10 +172,26 @@ def _parse_coordinates(text: str) -> tuple[float, float] | None:
     return None
 
 
-def _get_vehicle(
-    hass: HomeAssistant, device_id: str
+async def _async_get_vehicle(
+    hass: HomeAssistant, call: ServiceCall, policy: str
 ) -> tuple[VehicleCoordinator, Rivian]:
-    """Return the vehicle coordinator and API client for a device."""
+    """Authorize access to the vehicle and return its coordinator and client."""
+    device_id = call.data[ATTR_DEVICE_ID]
+    if call.context.user_id:
+        user = await hass.auth.async_get_user(call.context.user_id)
+        if user is None:
+            raise UnknownUser(context=call.context)
+        if not user.is_admin:
+            entities = [
+                entity
+                for entity in er.async_entries_for_device(er.async_get(hass), device_id)
+                if entity.platform == DOMAIN
+            ]
+            if not entities or not all(
+                user.permissions.check_entity(entity.entity_id, policy)
+                for entity in entities
+            ):
+                raise Unauthorized(context=call.context, permission=policy)
     if (device := dr.async_get(hass).async_get(device_id)) and (
         entry_data := hass.data.get(DOMAIN, {}).get(device.config_entry_id)
     ):
