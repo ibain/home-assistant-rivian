@@ -4,6 +4,8 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+from google.protobuf.timestamp_pb2 import Timestamp
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from rivian import VehicleCommand
@@ -31,8 +33,16 @@ from custom_components.rivian.services import (
     SERVICE_SEND_DESTINATION,
     async_setup_services,
 )
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.auth.const import GROUP_ID_READ_ONLY
+from homeassistant.auth.models import Group
+from homeassistant.auth.permissions.models import PermissionLookup
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceValidationError,
+    Unauthorized,
+)
+from homeassistant.helpers import entity_registry as er
 import homeassistant.helpers.device_registry as dr
 
 VEHICLE_ID = "01-123"
@@ -469,3 +479,163 @@ async def test_plan_trip_service_no_place(hass: HomeAssistant) -> None:
     )
     with pytest.raises(ServiceValidationError, match="No place found"):
         await _call(hass, SERVICE_PLAN_TRIP, device_id=device.id, location="zzz")
+
+
+@pytest.mark.parametrize("service", [SERVICE_SEND_DESTINATION, SERVICE_END_TRIP])
+async def test_navigation_rejects_read_only_user(hass, service):
+    """A read-only account cannot mutate a vehicle through device services."""
+
+    await hass.auth.async_create_user("Owner")
+    user = await hass.auth.async_create_user("Reader", group_ids=[GROUP_ID_READ_ONLY])
+    device, coordinator, api = _setup_vehicle(hass)
+    er.async_get(hass).async_get_or_create(
+        "sensor",
+        DOMAIN,
+        VIN + "-gear_status",
+        device_id=device.id,
+        config_entry=coordinator.config_entry,
+    )
+    data = {"device_id": device.id}
+    if service == SERVICE_SEND_DESTINATION:
+        data["location"] = LOCATION
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN, service, data, blocking=True, context=Context(user_id=user.id)
+        )
+    api._Rivian__graphql_query.assert_not_awaited()
+    coordinator.send_vehicle_command.assert_not_awaited()
+
+
+async def test_plan_trip_allows_read_only_user(hass):
+    """Planning needs read access, not control access."""
+
+    await hass.auth.async_create_user("Owner")
+    user = await hass.auth.async_create_user("Reader", group_ids=[GROUP_ID_READ_ONLY])
+    device, coordinator, _ = _setup_vehicle(hass, "ready", True, PLAN_OK)
+    er.async_get(hass).async_get_or_create(
+        "sensor",
+        DOMAIN,
+        VIN + "-gear_status",
+        device_id=device.id,
+        config_entry=coordinator.config_entry,
+    )
+    result = await hass.services.async_call(
+        DOMAIN,
+        SERVICE_PLAN_TRIP,
+        {"device_id": device.id, "location": "37.77, -122.42"},
+        blocking=True,
+        return_response=True,
+        context=Context(user_id=user.id),
+    )
+    assert result["trip_seconds"] == 20900
+
+
+async def test_navigation_permissions_are_for_selected_vehicle(hass):
+    """Permission to another device does not authorize this vehicle."""
+
+    await hass.auth.async_create_user("Owner")
+    user = await hass.auth.async_create_user("Restricted")
+    device, coordinator, api = _setup_vehicle(hass, "ready", True, END_TRIP_OK)
+    entity = er.async_get(hass).async_get_or_create(
+        "sensor",
+        DOMAIN,
+        VIN + "-gear_status",
+        device_id=device.id,
+        config_entry=coordinator.config_entry,
+    )
+    user.perm_lookup = PermissionLookup(er.async_get(hass), dr.async_get(hass))
+    user.groups = [
+        Group(
+            name="Other vehicle", policy={"entities": {"device_ids": {"other": True}}}
+        )
+    ]
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_END_TRIP,
+            {"device_id": device.id},
+            blocking=True,
+            context=Context(user_id=user.id),
+        )
+    api._Rivian__graphql_query.assert_not_awaited()
+    user.groups = [
+        Group(
+            name="Selected vehicle",
+            policy={"entities": {"device_ids": {device.id: True}}},
+        )
+    ]
+    assert user.permissions.check_entity(entity.entity_id, "control")
+    result = await hass.services.async_call(
+        DOMAIN,
+        SERVICE_END_TRIP,
+        {"device_id": device.id},
+        blocking=True,
+        return_response=True,
+        context=Context(user_id=user.id),
+    )
+    assert result["success"] is True
+
+
+async def test_replace_stops_when_end_trip_is_rejected(hass):
+    """A rejected clear must not silently append the destination to the old trip."""
+    failed = {"data": {"sendParallaxPayload": {"success": False, "sequenceNumber": 0}}}
+    device, _, api = _setup_vehicle(hass, "ready", True, failed)
+    with pytest.raises(HomeAssistantError, match="clear the current trip"):
+        await _call(
+            hass, SERVICE_SEND_DESTINATION, device_id=device.id, location=LOCATION
+        )
+    assert _operations(api) == ["SendUpdatedTrip"]
+
+
+@pytest.mark.parametrize("second_service", [SERVICE_SEND_DESTINATION, SERVICE_END_TRIP])
+async def test_navigation_mutations_are_serialized(hass, second_service):
+    """Neither another replacement nor end-trip can split the end/share pair."""
+    device, _, api = _setup_vehicle(hass)
+    clearing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def response(headers, url, body):
+        if not clearing.is_set():
+            clearing.set()
+            await release.wait()
+        data = END_TRIP_OK if body["operationName"] == "SendUpdatedTrip" else SHARE_OK
+        return MagicMock(status=200, json=AsyncMock(return_value=data))
+
+    api._Rivian__graphql_query.side_effect = response
+    first = asyncio.create_task(
+        _call(hass, SERVICE_SEND_DESTINATION, device_id=device.id, location=LOCATION)
+    )
+    await asyncio.wait_for(clearing.wait(), 1)
+    data = {"device_id": device.id}
+    if second_service == SERVICE_SEND_DESTINATION:
+        data["location"] = "1 Main St"
+    second = asyncio.create_task(_call(hass, second_service, **data))
+    await hass.async_block_till_done()
+    assert _operations(api) == ["SendUpdatedTrip"]
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 1)
+    expected = ["SendUpdatedTrip", "ParseAndShareLocationToVehicle", "SendUpdatedTrip"]
+    if second_service == SERVICE_SEND_DESTINATION:
+        expected.append("ParseAndShareLocationToVehicle")
+    assert _operations(api) == expected
+
+
+def test_end_trip_timestamp_milliseconds():
+    """Decode the envelope with protobuf and verify a nonzero fractional second."""
+
+    descriptor = descriptor_pb2.FileDescriptorProto(
+        name="review_envelope.proto", dependency=["google/protobuf/timestamp.proto"]
+    )
+    envelope = descriptor.message_type.add(name="Envelope")
+    envelope.field.add(
+        name="timestamp", number=12, type=11, type_name=".google.protobuf.Timestamp"
+    )
+    pool = descriptor_pool.DescriptorPool()
+    pool.AddSerializedFile(Timestamp.DESCRIPTOR.file.serialized_pb)
+    pool.Add(descriptor)
+    message = message_factory.GetMessageClass(pool.FindMessageTypeByName("Envelope"))
+    timestamp = message.FromString(
+        end_trip_payload(None, 1_760_000_123_456, bytes(16))
+    ).timestamp
+    assert timestamp.seconds == 1_760_000_123
+    assert timestamp.nanos == 456_000_000

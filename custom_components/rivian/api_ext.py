@@ -61,8 +61,8 @@ async def async_share_location(
     """Send a destination to the vehicle's navigation.
 
     Rivian's server runs a place search on `location`. Place names, addresses and
-    Google Maps share links resolve; a person's name does not. `wake` asks Rivian
-    to wake a sleeping vehicle first.
+    Google Maps share links resolve; a person's name does not. `wake` sets the
+    server's wake hint, which does not reliably wake a sleeping vehicle.
     """
     data = await _async_gateway(
         api,
@@ -92,8 +92,8 @@ async def async_end_trip(
 ) -> dict[str, Any]:
     """Clear the vehicle's active trip, as the app's End Trip button does.
 
-    Rivian wakes a sleeping vehicle for this itself (requiresWakeup is part of
-    the mutation).
+    A sleeping vehicle may receive the command only when it next wakes, even
+    though requiresWakeup is part of the mutation.
     """
     payload = base64.b64encode(
         end_trip_payload(user_id, int(time.time() * 1000), uuid.uuid4().bytes)
@@ -238,7 +238,9 @@ def end_trip_payload(user_id: str | None, now_ms: int, correlation_id: bytes) ->
     trip = _pb_bytes(1, _pb_string(1, f"end_trip_{now_ms}")) + _pb_bytes(2, b"")
     if user_id:
         trip += _pb_bytes(3, _pb_string(1, user_id))
-    timestamp = _pb_varint(1, now_ms // 1000) + _pb_varint(2, now_ms % 1_000_000_000)
+    timestamp = _pb_varint(1, now_ms // 1000) + _pb_varint(
+        2, (now_ms % 1000) * 1_000_000
+    )
     return (
         _pb_bytes(10, _pb_bytes(2, trip))
         + _pb_bytes(12, timestamp)

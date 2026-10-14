@@ -3,7 +3,8 @@ blueprint:
   description: >-
     At a fixed time each day, find the first calendar event of the day with a location,
     plan the trip and send the destination to the vehicle, so it's loaded before you're
-    up. Covers trips longer than the look-ahead of the "time to leave" blueprint.
+    up. Waits for Park before sending. Covers trips longer than the look-ahead of
+    the "time to leave" blueprint.
     Needs the Rivian (Unofficial) integration's rivian.plan_trip and
     rivian.send_destination actions.
   domain: automation
@@ -13,6 +14,17 @@ blueprint:
       name: Vehicle
       selector:
         device:
+          integration: rivian
+    gear_sensor:
+      name: Gear Selector (optional)
+      description: >-
+        The selected vehicle's Gear Selector sensor; sends wait for it to read Park.
+        Leave empty to use the vehicle's own gear sensor automatically; pick it only
+        if you renamed that entity.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
           integration: rivian
     calendars:
       name: Calendars
@@ -54,6 +66,13 @@ blueprint:
       default: true
       selector:
         boolean: {}
+    max_park_wait:
+      name: Longest wait for Park
+      description: Wait for Park before sending; skip if the event has started by then.
+      default:
+        hours: 2
+      selector:
+        duration: {}
     skip_pattern:
       name: Skip events matching
       description: Regular expression; events whose location or title matches are skipped.
@@ -75,12 +94,19 @@ triggers:
 
 variables:
   vehicle: !input vehicle
+  gear_input: !input gear_sensor
+  gear_sensor: >-
+    {{ gear_input or (device_entities(vehicle) | select('search', 'gear_selector') | first | default('')) }}
   traffic_factor: !input traffic_factor
   include_charging: !input include_charging
   buffer_minutes: !input buffer_minutes
   replace: !input replace
   skip_pattern: !input skip_pattern
   notify_service: !input notify_service
+
+conditions:
+  - condition: template
+    value_template: "{{ gear_sensor != '' and gear_sensor in device_entities(vehicle) }}"
 
 actions:
   - action: calendar.get_events
@@ -93,10 +119,12 @@ actions:
   - variables:
       event: >-
         {% set ns = namespace(found=none) %}
-        {% for ev in events.values() | map(attribute='events') | sum(start=[]) | sort(attribute='start') %}
+        {% for ev in events.values() | map(attribute='events') | sum(start=[]) %}
           {% set loc = ev.location | default('', true) | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim %}
           {% set title = ev.summary | default('', true) %}
-          {% if ns.found is none and loc != '' and 'T' in ev.start
+          {% if loc != '' and 'T' in ev.start
+                and as_timestamp(ev.start) > as_timestamp(now())
+                and (ns.found is none or as_timestamp(ev.start) < as_timestamp(ns.found.start))
                 and not (skip_pattern and (loc is search(skip_pattern) or title is search(skip_pattern))) %}
             {% set ns.found = {'start': ev.start, 'title': title, 'location': loc} %}
           {% endif %}
@@ -112,6 +140,11 @@ actions:
   - variables:
       travel_seconds: "{{ (plan.drive_seconds * traffic_factor + (plan.charge_seconds if include_charging else 0)) | int }}"
       destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or event.location }}"
+  - wait_template: "{{ is_state(gear_sensor, 'Park') }}"
+    timeout: !input max_park_wait
+    continue_on_timeout: false
+  - condition: template
+    value_template: "{{ as_timestamp(now()) < as_timestamp(event.start) }}"
   - action: rivian.send_destination
     data:
       device_id: !input vehicle
@@ -128,4 +161,4 @@ actions:
             {{ destination }}. Leave by
             {{ (as_datetime(event.start) - timedelta(seconds=travel_seconds + buffer_minutes * 60)) | as_local | as_timestamp | timestamp_custom('%-I:%M %p') }}
             ({{ (travel_seconds / 60) | round | int }} min
-            {%- if plan.charge_seconds %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
+            {%- if plan.charge_seconds and include_charging %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
