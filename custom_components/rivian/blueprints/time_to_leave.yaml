@@ -114,6 +114,33 @@ blueprint:
       default: "06:00:00"
       selector:
         time: {}
+    clear_mode:
+      name: Clear skipped events
+      description: >-
+        End the trip if you didn't go: the vehicle hasn't moved since the send and no
+        other event with a location is coming up. Choose when to check.
+      default: "off"
+      selector:
+        select:
+          options:
+            - label: "Don't clear"
+              value: "off"
+            - label: At the event's end
+              value: event_end
+            - label: At a set time from the event's start
+              value: from_start
+    clear_minutes:
+      name: Clear offset from the start
+      description: >-
+        Minutes after the event's start to clear, for "At a set time from the event's
+        start". Negative clears before the start.
+      default: 30
+      selector:
+        number:
+          min: -720
+          max: 1440
+          step: 5
+          unit_of_measurement: min
     skip_pattern:
       name: Skip events matching
       description: >-
@@ -157,11 +184,17 @@ variables:
   replace: !input replace
   earliest_time: !input earliest_time
   morning_send: !input morning_send
+  look_ahead: !input look_ahead
+  clear_mode: !input clear_mode
+  clear_minutes: !input clear_minutes
   skip_pattern: !input skip_pattern
   notify_service: !input notify_service
   calendar_event: "{{ trigger.calendar_event | default({}, true) }}"
   title: "{{ calendar_event.summary | default('', true) }}"
   start: "{{ calendar_event.start | default('', true) }}"
+  end: "{{ calendar_event.end | default('', true) }}"
+  tracker: "{{ device_entities(vehicle) | select('search', '^device_tracker[.]') | first | default('') }}"
+  sent_any: false
   location: >-
     {{ calendar_event.location | default('', true)
        | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
@@ -190,12 +223,16 @@ actions:
                         and as_timestamp(ev.start) > as_timestamp(now())
                         and (ns.found is none or as_timestamp(ev.start) < as_timestamp(ns.found.start))
                         and not (skip_pattern and (loc is search(skip_pattern) or ev_title is search(skip_pattern))) %}
-                    {% set ns.found = {'start': ev.start, 'title': ev_title, 'location': loc} %}
+                    {% set ns.found = {'start': ev.start, 'end': ev.end | default('', true), 'title': ev_title, 'location': loc} %}
                   {% endif %}
                 {% endfor %}
                 {{ ns.found }}
           - condition: template
             value_template: "{{ event is mapping }}"
+          - variables:
+              start: "{{ event.start }}"
+              end: "{{ event.end }}"
+              title: "{{ event.title }}"
           - action: rivian.plan_trip
             data:
               device_id: !input vehicle
@@ -214,6 +251,14 @@ actions:
               park_timeout: !input max_park_wait
               not_after: "{{ event.start }}"
             response_variable: sent
+          - if:
+              - condition: template
+                value_template: "{{ sent.sent }}"
+            then:
+              - variables:
+                  sent_any: true
+                  sent_lat: "{{ state_attr(tracker, 'latitude') if tracker else none }}"
+                  sent_lon: "{{ state_attr(tracker, 'longitude') if tracker else none }}"
           - if:
               - condition: template
                 value_template: "{{ sent.sent and notify_service != '' }}"
@@ -246,7 +291,6 @@ actions:
               end_date_time: "{{ (as_datetime(start) - timedelta(seconds=1)).isoformat() }}"
             response_variable: upcoming
           - variables:
-              tracker: "{{ device_entities(vehicle) | select('search', '^device_tracker[.]') | first | default('') }}"
               estimated_drive: "{{ (plan.drive_seconds * traffic_factor) | int }}"
               depart_time: >-
                 {% set t = as_datetime(start) | as_local - timedelta(seconds=estimated_drive) %}
@@ -333,6 +377,9 @@ actions:
                       then:
                         - variables:
                             last_sent: "{{ as_timestamp(now()) }}"
+                            sent_any: true
+                            sent_lat: "{{ state_attr(tracker, 'latitude') if tracker else none }}"
+                            sent_lon: "{{ state_attr(tracker, 'longitude') if tracker else none }}"
                         - if:
                             - condition: template
                               value_template: "{{ notify_service != '' }}"
@@ -341,3 +388,51 @@ actions:
                               data:
                                 title: "{{ repeat.item.title }}"
                                 message: "{{ summary }}"
+  # Clear a skipped event: the vehicle hasn't moved since the send and nothing
+  # else with a location is coming up to replace the trip.
+  - if:
+      - condition: template
+        value_template: "{{ clear_mode != 'off' and sent_any and start != '' }}"
+    then:
+      - variables:
+          clear_at: >-
+            {% if clear_mode == 'event_end' and end != '' %}{{ end }}
+            {%- else %}{{ (as_datetime(start) + timedelta(minutes=clear_minutes)).isoformat() }}{% endif %}
+      - delay:
+          seconds: "{{ [0, as_timestamp(clear_at) - as_timestamp(now())] | max }}"
+      - action: calendar.get_events
+        target:
+          entity_id: !input calendars
+        data:
+          start_date_time: "{{ now().isoformat() }}"
+          end_date_time: "{{ (as_datetime(clear_at) + timedelta(**look_ahead)).isoformat() }}"
+        response_variable: upcoming_after
+      - variables:
+          another_event: >-
+            {% set ns = namespace(n=0) %}
+            {% for ev in upcoming_after.values() | map(attribute='events') | sum(start=[]) %}
+              {% set loc = ev.location | default('', true) %}
+              {% if loc != '' and 'T' in ev.start and as_timestamp(ev.start) != as_timestamp(start)
+                    and not (skip_pattern and (loc is search(skip_pattern) or (ev.summary | default('', true)) is search(skip_pattern))) %}
+                {% set ns.n = ns.n + 1 %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.n > 0 }}
+          stayed: >-
+            {{ tracker != '' and sent_lat is not none and state_attr(tracker, 'latitude') is not none
+               and distance(state_attr(tracker, 'latitude'), state_attr(tracker, 'longitude'), sent_lat, sent_lon) | float(1) < 0.2 }}
+      - if:
+          - condition: template
+            value_template: "{{ stayed and not another_event }}"
+        then:
+          - action: rivian.end_trip
+            data:
+              device_id: !input vehicle
+          - if:
+              - condition: template
+                value_template: "{{ notify_service != '' }}"
+            then:
+              - action: "{{ notify_service }}"
+                data:
+                  title: "Cleared: {{ title }}"
+                  message: "The vehicle didn't move, so the trip to {{ destination }} was ended."

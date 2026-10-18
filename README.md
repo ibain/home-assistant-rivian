@@ -143,6 +143,7 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 | Longest wait for Park | 2 h | Sends never happen while driving; this caps the wait |
 | Earliest send time | 06:00 | No sends before this time each day |
 | Morning send, Morning send time | on, 06:00 | Also send the day's first event with a location at this time |
+| Clear skipped events | off | End the trip if you didn't go: at the event's end, or a set number of minutes from its start (negative = before). Only when the vehicle hasn't moved since the send and no other event with a location is coming up |
 | Skip events matching | `://` | Skips meeting links; a regular expression |
 
 **4. Optional: Google for traffic-aware drive times.** Rivian's planner doesn't know about traffic (home to Irvine reads 56 min at any time of day; Google says 2 h at 4:30 PM). Google's Routes API fixes that, at no cost for a few calls a day, but the setup has a few traps:
@@ -155,7 +156,7 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 
 "The Routes API is not enabled for this API key" almost always means the key and the enabled API are in different projects, the key has an application restriction, or it hasn't propagated yet.
 
-**What to expect.** A send that is still waiting for Park when the event starts is skipped. Early and just-in-time sends that become due together are merged into one. If Google returns no route or fails, the Rivian estimate times the traffic factor is used.
+**What to expect.** A send that is still waiting for Park when the event starts is skipped. With "Clear skipped events" on, a trip you never drove is ended at the chosen time and you get a "Cleared" notification; if you left late, the vehicle moved, so nothing is cleared. Early and just-in-time sends that become due together are merged into one. If Google returns no route or fails, the Rivian estimate times the traffic factor is used.
 
 The notification reads like "Loaded: Dentist. 1 Main St, Burbank, CA. Leave by 8:38 AM (82 min with traffic)." A Home Assistant restart drops automation runs that are waiting, so an event inside the look-ahead window at restart time is only sent if the restart happens before its trigger. Deleting an event after it was sent doesn't clear the vehicle; the next send replaces it, or call `rivian.end_trip`.
 
