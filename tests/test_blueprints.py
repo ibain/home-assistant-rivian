@@ -120,9 +120,12 @@ async def navigation(hass, freezer):
         },
         "event": {
             "start": "2026-10-15T09:00:00-07:00",
+            "end": "2026-10-15T10:00:00-07:00",
             "summary": "Dentist",
             "location": "1 Main St",
         },
+        "tracker": tracker.entity_id,
+        "ended": [],
         "events": [],
         "sent": [],
         "send_result": {"result": 0, "sent": True},
@@ -162,11 +165,16 @@ async def navigation(hass, freezer):
     async def notify(call):
         data["notifications"].append(dict(call.data))
 
+    async def end_trip(call):
+        data["ended"].append(dict(call.data))
+        return {"success": True, "sequence_number": 0}
+
     for domain, action, handler, response in [
         ("calendar", "get_events", calendar, SupportsResponse.ONLY),
         ("rivian", "plan_trip", plan, SupportsResponse.ONLY),
         ("google_travel_time", "get_travel_times", google, SupportsResponse.ONLY),
         ("rivian", "send_destination", send, SupportsResponse.OPTIONAL),
+        ("rivian", "end_trip", end_trip, SupportsResponse.OPTIONAL),
     ]:
         hass.services.async_register(
             domain, action, handler, supports_response=response
@@ -376,3 +384,84 @@ async def test_setup_reloads_automations_after_a_blueprint_change(hass, tmp_path
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
     await hass.async_block_till_done()
     assert reloads == [1]
+
+
+async def _run_until_clear_time(hass, navigation, at, trigger_id="event", **inputs):
+    """Run the blueprint, let the clear step start waiting, then jump to `at`."""
+    task = asyncio.create_task(_run_blueprint(hass, navigation, trigger_id, **inputs))
+    await asyncio.wait_for(navigation["paused"].wait(), 1)
+    assert len(navigation["sent"]) == 1 and not navigation["ended"]
+    return task, at
+
+
+async def _jump_and_finish(hass, task, freezer, at):
+    freezer.move_to(at)
+    async_fire_time_changed(hass)
+    await asyncio.wait_for(task, 1)
+
+
+async def test_clear_at_event_end_when_the_vehicle_stayed(hass, navigation, freezer):
+    task, at = await _run_until_clear_time(
+        hass, navigation, "2026-10-15T17:00:00+00:00", clear_mode="event_end"
+    )
+    await _jump_and_finish(hass, task, freezer, at)
+    assert len(navigation["ended"]) == 1
+    assert navigation["notifications"][-1]["title"] == "Cleared: Dentist"
+
+
+async def test_no_clear_when_the_vehicle_moved(hass, navigation, freezer):
+    task, at = await _run_until_clear_time(
+        hass, navigation, "2026-10-15T17:00:00+00:00", clear_mode="event_end"
+    )
+    hass.states.async_set(
+        navigation["tracker"], "not_home", {"latitude": 34.2, "longitude": -119.3}
+    )
+    await _jump_and_finish(hass, task, freezer, at)
+    assert navigation["ended"] == []
+
+
+async def test_no_clear_when_another_located_event_follows(hass, navigation, freezer):
+    navigation["events"] = [
+        {
+            "start": "2026-10-15T11:00:00-07:00",
+            "end": "2026-10-15T12:00:00-07:00",
+            "summary": "Lunch",
+            "location": "2 Main St",
+        }
+    ]
+    task, at = await _run_until_clear_time(
+        hass, navigation, "2026-10-15T17:00:00+00:00", clear_mode="event_end"
+    )
+    await _jump_and_finish(hass, task, freezer, at)
+    assert navigation["ended"] == []
+
+
+async def test_clear_relative_to_start_can_be_before_it(hass, navigation, freezer):
+    """A negative offset clears before the event starts (08:30 for a 09:00 event)."""
+    task, at = await _run_until_clear_time(
+        hass,
+        navigation,
+        "2026-10-15T15:30:00+00:00",
+        clear_mode="from_start",
+        clear_minutes=-30,
+    )
+    freezer.move_to("2026-10-15T15:25:00+00:00")
+    async_fire_time_changed(hass)
+    await asyncio.sleep(0)
+    assert navigation["ended"] == []
+    await _jump_and_finish(hass, task, freezer, at)
+    assert len(navigation["ended"]) == 1
+
+
+async def test_morning_send_also_clears(hass, navigation, freezer):
+    navigation["events"] = [navigation["event"]]
+    task, at = await _run_until_clear_time(
+        hass, navigation, "2026-10-15T17:00:00+00:00", "morning", clear_mode="event_end"
+    )
+    await _jump_and_finish(hass, task, freezer, at)
+    assert len(navigation["ended"]) == 1
+
+
+async def test_clear_off_by_default(hass, navigation):
+    await _run_blueprint(hass, navigation)
+    assert navigation["ended"] == []
