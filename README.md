@@ -345,7 +345,7 @@ Put the full street address in the event (including "Blvd", "St" and the city): 
 | Charging Schedule Enabled      | Switch  | Enable/disable charging schedule                                                                                                                          |
 | Charging Schedule End          | Time    | Set charging schedule end time                                                                                                                            |
 | Charging Schedule Start        | Time    | Set charging schedule start time                                                                                                                          |
-| Closures                       | Lock    | Lock/unlock all closures                                                                                                                                  |
+| Closures                       | Lock    | Lock/unlock all closures. Waits for the vehicle to confirm (up to 2 minutes if it's asleep) and reports a failure                                         |
 | Drop Tailgate                  | Button  | Drop tailgate                                                                                                                                             |
 | Front Trunk                    | Cover   | Open/close front trunk                                                                                                                                    |
 | Gear Guard Video               | Switch  | Enable/disable gear guard video                                                                                                                           |
