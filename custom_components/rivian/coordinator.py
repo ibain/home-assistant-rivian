@@ -317,6 +317,8 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
     """Vehicle data update coordinator for Rivian."""
 
     key = "vehicleState"
+    # Set when Rivian turns Parallax down for the vehicle, until Home Assistant restarts
+    _parallax_unsupported = False
     _update_interval_seconds = 15 * 60  # 15 minutes
 
     def __init__(
@@ -339,6 +341,7 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         self._unsub_handler: Callable[[], Awaitable[None]] | None = None
         self._unsub_parallax: Callable[[], Awaitable[None]] | None = None
         self._awake = asyncio.Event()
+        self._body_command_lock = asyncio.Lock()
         self._charging_schedule: dict[str, Any] | None = None
         self._last_schedule_fetch: float = 0.0
 
@@ -564,9 +567,13 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         self, command: VehicleCommand, params: dict[str, Any] | None = None
     ) -> None:
         """Send a command to the vehicle."""
-        if not params and await self._send_over_parallax(command):
+        if params or not parallax_command.is_body_command(command):
+            await self._send_legacy_command(command, params)
             return
-        await self._send_legacy_command(command, params)
+        # One lock or unlock at a time, so they reach the vehicle in the order given
+        async with self._body_command_lock:
+            if not await self._send_over_parallax(command):
+                await self._send_legacy_command(command, params)
 
     async def _send_over_parallax(self, command: VehicleCommand) -> bool:
         """Send a lock or unlock the way the Rivian app does.
@@ -577,7 +584,14 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         """
         entry_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
         vehicle = entry_data[ATTR_VEHICLE][self.vehicle_id]
-        if not parallax_command.supports(command, vehicle):
+        private_key = self.config_entry.options.get("private_key")
+        if (
+            self._parallax_unsupported
+            # Following the command shouldn't be what opens or closes the web socket
+            or not (self._unsub_handler or self._unsub_parallax)
+            or not private_key
+            or not parallax_command.supports(command, vehicle)
+        ):
             return False
         asleep = self.get("powerState") == "sleep"
         try:
@@ -586,15 +600,23 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
                 command,
                 vehicle_id=self.vehicle_id,
                 vehicle=vehicle,
-                private_key=self.config_entry.options.get("private_key"),
+                private_key=private_key,
                 timeout=parallax_command.timeout_for(vehicle, asleep),
             )
         except parallax_command.ParallaxUnavailable as err:
-            _LOGGER.warning(
-                "Couldn't send %s over Parallax (%s), sending it the usual way",
-                command,
-                err,
-            )
+            if err.permanent:
+                self._parallax_unsupported = True
+                _LOGGER.warning(
+                    "Rivian won't take %s over Parallax (%s), using the usual way",
+                    command,
+                    err,
+                )
+            else:
+                _LOGGER.info(
+                    "Couldn't send %s over Parallax (%s), sending it the usual way",
+                    command,
+                    err,
+                )
             return False
         return True
 
