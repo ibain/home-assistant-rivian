@@ -392,7 +392,7 @@ These controls need a phone key paired over Bluetooth (see [Remote Vehicle Contr
 | Charging schedule enabled  | Switch  | Enable/disable charging schedule                                                                                                                         |
 | Charging schedule end      | Time    | Set charging schedule end time                                                                                                                           |
 | Charging schedule start    | Time    | Set charging schedule start time                                                                                                                         |
-| Closures                   | Lock    | Lock/unlock all closures                                                                                                                                 |
+| Closures                   | Lock    | Lock/unlock all closures. Waits for the vehicle to confirm (up to 2 minutes if it's asleep) and reports a failure                                        |
 | Drop tailgate              | Button  | Drop tailgate, R1T only                                                                                                                                  |
 | Front trunk                | Cover   | Open/close front trunk                                                                                                                                   |
 | Gear Guard video           | Switch  | Enable/disable gear guard video                                                                                                                          |

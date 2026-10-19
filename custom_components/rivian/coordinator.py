@@ -32,6 +32,7 @@ from homeassistant.helpers.issue_registry import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from . import parallax_command
 from .const import (
     ATTR_COORDINATOR,
     ATTR_USER,
@@ -337,6 +338,8 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
     """Vehicle data update coordinator for Rivian."""
 
     key = "vehicleState"
+    # Set when Rivian turns Parallax down for the vehicle, until Home Assistant restarts
+    _parallax_unsupported = False
     _update_interval_seconds = 15 * 60  # 15 minutes
 
     def __init__(
@@ -359,6 +362,7 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         self._unsub_handler: Callable[[], Awaitable[None]] | None = None
         self._unsub_parallax: Callable[[], Awaitable[None]] | None = None
         self._awake = asyncio.Event()
+        self._body_command_lock = asyncio.Lock()
         # When any message last arrived, and the newest time the vehicle reported
         self._last_message: datetime | None = None
         self._last_report: datetime | None = None
@@ -803,8 +807,65 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         self, command: VehicleCommand, params: dict[str, Any] | None = None
     ) -> None:
         """Send a command to the vehicle."""
+        if params or not parallax_command.is_body_command(command):
+            await self._send_legacy_command(command, params)
+            return
+        # One lock or unlock at a time, so they reach the vehicle in the order given
+        async with self._body_command_lock:
+            if not await self._send_over_parallax(command):
+                await self._send_legacy_command(command, params)
+
+    async def _send_over_parallax(self, command: VehicleCommand) -> bool:
+        """Send a lock or unlock the way the Rivian app does.
+
+        Returns False, having sent nothing, when the vehicle can't take the command
+        this way. The vehicle is woken by the request rather than first, and a
+        failure to do the command raises.
+        """
+        entry_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
+        vehicle = entry_data[ATTR_VEHICLE][self.vehicle_id]
+        private_key = self.config_entry.options.get("private_key")
+        if (
+            self._parallax_unsupported
+            # Following the command shouldn't be what opens or closes the web socket
+            or not (self._unsub_handler or self._unsub_parallax)
+            or not private_key
+            or not parallax_command.supports(command, vehicle)
+        ):
+            return False
+        asleep = self.get("powerState") == "sleep"
+        try:
+            await parallax_command.async_send_body_command(
+                self.api,
+                command,
+                vehicle_id=self.vehicle_id,
+                vehicle=vehicle,
+                private_key=private_key,
+                timeout=parallax_command.timeout_for(vehicle, asleep),
+            )
+        except parallax_command.ParallaxUnavailable as err:
+            if err.permanent:
+                self._parallax_unsupported = True
+                _LOGGER.warning(
+                    "Rivian won't take %s over Parallax (%s), using the usual way",
+                    command,
+                    err,
+                )
+            else:
+                _LOGGER.info(
+                    "Couldn't send %s over Parallax (%s), sending it the usual way",
+                    command,
+                    err,
+                )
+            return False
+        return True
+
+    async def _send_legacy_command(
+        self, command: VehicleCommand, params: dict[str, Any] | None = None
+    ) -> None:
+        """Send a command with the vehicle command mutation."""
         if self.get("powerState") == "sleep" and command != VehicleCommand.WAKE_VEHICLE:
-            await self.send_vehicle_command(VehicleCommand.WAKE_VEHICLE)
+            await self._send_legacy_command(VehicleCommand.WAKE_VEHICLE)
             try:
                 await asyncio.wait_for(self._awake.wait(), 30)
             except TimeoutError:

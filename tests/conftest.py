@@ -863,6 +863,13 @@ def _setup_mock_environment() -> None:
         rivian_mod.parallax = parallax_submod  # type: ignore[attr-defined]
         sys.modules["rivian.parallax"] = parallax_submod
 
+        # parallax_command.py imports the gateway URL and base headers
+        client_submod = DynamicModule("rivian.rivian", is_package=False)
+        client_submod.BASE_HEADERS = {}  # type: ignore[attr-defined]
+        client_submod.GRAPHQL_GATEWAY = "https://gateway.test/graphql"  # type: ignore[attr-defined]
+        rivian_mod.rivian = client_submod  # type: ignore[attr-defined]
+        sys.modules["rivian.rivian"] = client_submod
+
 
 _setup_mock_environment()
 
