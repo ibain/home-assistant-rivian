@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from . import parallax_command
 from .const import (
     ATTR_COORDINATOR,
     ATTR_USER,
@@ -563,8 +564,46 @@ class VehicleCoordinator(RivianDataUpdateCoordinator[dict[str, Any]]):
         self, command: VehicleCommand, params: dict[str, Any] | None = None
     ) -> None:
         """Send a command to the vehicle."""
+        if not params and await self._send_over_parallax(command):
+            return
+        await self._send_legacy_command(command, params)
+
+    async def _send_over_parallax(self, command: VehicleCommand) -> bool:
+        """Send a lock or unlock the way the Rivian app does.
+
+        Returns False, having sent nothing, when the vehicle can't take the command
+        this way. The vehicle is woken by the request rather than first, and a
+        failure to do the command raises.
+        """
+        entry_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
+        vehicle = entry_data[ATTR_VEHICLE][self.vehicle_id]
+        if not parallax_command.supports(command, vehicle):
+            return False
+        asleep = self.get("powerState") == "sleep"
+        try:
+            await parallax_command.async_send_body_command(
+                self.api,
+                command,
+                vehicle_id=self.vehicle_id,
+                vehicle=vehicle,
+                private_key=self.config_entry.options.get("private_key"),
+                timeout=parallax_command.timeout_for(vehicle, asleep),
+            )
+        except parallax_command.ParallaxUnavailable as err:
+            _LOGGER.warning(
+                "Couldn't send %s over Parallax (%s), sending it the usual way",
+                command,
+                err,
+            )
+            return False
+        return True
+
+    async def _send_legacy_command(
+        self, command: VehicleCommand, params: dict[str, Any] | None = None
+    ) -> None:
+        """Send a command with the vehicle command mutation."""
         if self.get("powerState") == "sleep" and command != VehicleCommand.WAKE_VEHICLE:
-            await self.send_vehicle_command(VehicleCommand.WAKE_VEHICLE)
+            await self._send_legacy_command(VehicleCommand.WAKE_VEHICLE)
             try:
                 await asyncio.wait_for(self._awake.wait(), 30)
             except asyncio.TimeoutError:
