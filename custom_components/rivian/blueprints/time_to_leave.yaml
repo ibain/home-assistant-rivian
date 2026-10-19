@@ -172,6 +172,9 @@ triggers:
   - trigger: time
     id: morning
     at: !input morning_time
+  - trigger: homeassistant
+    event: start
+    id: restart
 
 variables:
   vehicle: !input vehicle
@@ -200,6 +203,37 @@ variables:
        | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
 
 actions:
+  # After a restart, pick up the next event with a location inside the look-ahead:
+  # the run that was waiting to send it was cancelled by the restart.
+  - if:
+      - condition: template
+        value_template: "{{ trigger.id == 'restart' }}"
+    then:
+      - action: calendar.get_events
+        target:
+          entity_id: !input calendars
+        data:
+          start_date_time: "{{ now().isoformat() }}"
+          end_date_time: "{{ (now() + timedelta(**look_ahead)).isoformat() }}"
+        response_variable: pending
+      - variables:
+          calendar_event: >-
+            {% set ns = namespace(found={}) %}
+            {% for ev in pending.values() | map(attribute='events') | sum(start=[]) %}
+              {% set loc = ev.location | default('', true) %}
+              {% if loc != '' and 'T' in ev.start and as_timestamp(ev.start) > as_timestamp(now())
+                    and (not ns.found or as_timestamp(ev.start) < as_timestamp(ns.found.start))
+                    and not (skip_pattern and (loc is search(skip_pattern) or (ev.summary | default('', true)) is search(skip_pattern))) %}
+                {% set ns.found = ev %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.found }}
+          title: "{{ calendar_event.summary | default('', true) }}"
+          start: "{{ calendar_event.start | default('', true) }}"
+          end: "{{ calendar_event.end | default('', true) }}"
+          location: >-
+            {{ calendar_event.location | default('', true)
+               | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
   - choose:
       # Morning: the day's first event with a location, sent at a fixed time.
       - conditions:
@@ -274,7 +308,7 @@ actions:
       - conditions:
           - condition: template
             value_template: >-
-              {{ trigger.id == 'event' and location != '' and 'T' in start
+              {{ trigger.id in ['event', 'restart'] and location != '' and 'T' in start
                  and not (skip_pattern and (location is search(skip_pattern) or title is search(skip_pattern))) }}
         sequence:
           - action: rivian.plan_trip

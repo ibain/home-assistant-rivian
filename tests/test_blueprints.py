@@ -43,7 +43,7 @@ def test_blueprint_is_a_valid_automation_blueprint() -> None:
     )
     assert data["blueprint"]["domain"] == "automation"
     assert {"vehicle", "calendars", "morning_time"} <= data["blueprint"]["input"].keys()
-    assert [t["id"] for t in data["triggers"]] == ["event", "morning"]
+    assert [t["id"] for t in data["triggers"]] == ["event", "morning", "restart"]
 
 
 def test_install_blueprints_copies_updates_and_prunes(tmp_path: Path) -> None:
@@ -465,3 +465,26 @@ async def test_morning_send_also_clears(hass, navigation, freezer):
 async def test_clear_off_by_default(hass, navigation):
     await _run_blueprint(hass, navigation)
     assert navigation["ended"] == []
+
+
+async def test_restart_resumes_the_next_upcoming_event(hass, navigation):
+    """After a restart, an event with a location inside the look-ahead is picked up."""
+    navigation["events"] = [
+        {
+            "start": "2026-10-15T08:30:00-07:00",
+            "end": "2026-10-15T09:00:00-07:00",
+            "summary": "Call",
+        },
+        navigation["event"],
+    ]
+    await _run_blueprint(hass, navigation, "restart")
+    (call,) = navigation["sent"]
+    assert call["not_after"] == navigation["event"]["start"]
+    assert navigation["notifications"][0]["title"] == "Loaded: Dentist"
+
+
+async def test_restart_with_nothing_due_sends_nothing(hass, navigation):
+    """The calendar returns only events in the look-ahead window; none means no send."""
+    navigation["events"] = []
+    await _run_blueprint(hass, navigation, "restart")
+    assert not navigation["sent"]
