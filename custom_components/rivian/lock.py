@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 import logging
 from typing import Any, Final
 
@@ -66,8 +67,24 @@ class RivianLockEntity(RivianVehicleControlEntity, LockEntity):
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the lock."""
-        await self.entity_description.lock(self.coordinator)
+        self._attr_is_locking = True
+        await self._async_command(self.entity_description.lock)
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the lock."""
-        await self.entity_description.unlock(self.coordinator)
+        self._attr_is_unlocking = True
+        await self._async_command(self.entity_description.unlock)
+
+    async def _async_command(
+        self, command: Callable[[VehicleCoordinator], Awaitable[None]]
+    ) -> None:
+        """Run a command, showing the lock as locking or unlocking until it is done.
+
+        The vehicle can take a while to wake and do it.
+        """
+        self.async_write_ha_state()
+        try:
+            await command(self.coordinator)
+        finally:
+            self._attr_is_locking = self._attr_is_unlocking = False
+            self.async_write_ha_state()
