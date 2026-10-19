@@ -158,7 +158,7 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 
 **What to expect.** A send that is still waiting for Park when the event starts is skipped. With "Clear skipped events" on, a trip you never drove is ended at the chosen time and you get a "Cleared" notification; if you left late, the vehicle moved, so nothing is cleared. Early and just-in-time sends that become due together are merged into one. If Google returns no route or fails, the Rivian estimate times the traffic factor is used.
 
-The notification reads like "Loaded: Dentist. 1 Main St, Burbank, CA. Leave by 8:38 AM (82 min with traffic)." A Home Assistant restart drops automation runs that are waiting, so an event inside the look-ahead window at restart time is only sent if the restart happens before its trigger. Deleting an event after it was sent doesn't clear the vehicle; the next send replaces it, or call `rivian.end_trip`.
+The notification reads like "Loaded: Dentist. 1 Main St, Burbank, CA. Leave by 8:38 AM (82 min with traffic)." A Home Assistant restart (including a core update) cancels automation runs that are waiting; on start, the blueprint looks for an event with a location due within the look-ahead and runs the flow for it again, so the destination is re-sent and the just-in-time send re-armed. Deleting an event after it was sent doesn't clear the vehicle; the next send replaces it, or call `rivian.end_trip`.
 
 ### Example: leave on time for the next calendar event
 
