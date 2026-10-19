@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -173,7 +173,8 @@ async def async_send_body_command(
         if encoded and (state := decode_state(encoded)):
             states.put_nowait(state)
 
-    unsubscribe = await api._start_subscription(
+    unsubscribe = await _subscribe(
+        api,
         {
             "operationName": "vehicleCommandStatePx",
             "query": STATE_QUERY,
@@ -211,6 +212,29 @@ async def async_send_body_command(
     if state.error or state.status not in (None, STATUS_SUCCESS):
         raise HomeAssistantError(f"The vehicle did not {action}: {state.describe}")
     return state
+
+
+async def _subscribe(
+    api: Rivian,
+    payload: dict[str, Any],
+    callback: Callable[[dict[str, Any]], None],
+    description: str,
+) -> Callable[[], Awaitable[None]] | None:
+    """Start a subscription; None if it could not.
+
+    TEST SHIM: clients before 2.3 have no `_start_subscription`, so connect the
+    web socket the way their own subscribe methods do.
+    """
+    if hasattr(api, "_start_subscription"):
+        return await api._start_subscription(payload, callback, description)
+    try:
+        await api._ws_connect()
+        async with asyncio.timeout(api.request_timeout):
+            await api._ws_monitor.connection_ack.wait()
+        return await api._ws_monitor.start_subscription(payload, callback)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Unable to subscribe to %s: %s", description, err)
+        return None
 
 
 async def _async_send(api: Rivian, vehicle_id: str, rvm: str, payload: bytes) -> None:

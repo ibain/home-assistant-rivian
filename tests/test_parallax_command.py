@@ -413,6 +413,42 @@ async def test_a_signing_failure_falls_back_without_subscribing() -> None:
     harness.api._start_subscription.assert_not_awaited()
 
 
+class TestSubscribeShim:
+    """Clients before 2.3 have no `_start_subscription`."""
+
+    @staticmethod
+    def old_client(*, connects: bool = True) -> SimpleNamespace:
+        monitor = SimpleNamespace(
+            connection_ack=SimpleNamespace(wait=AsyncMock()),
+            start_subscription=AsyncMock(return_value="unsubscribe"),
+        )
+        return SimpleNamespace(
+            request_timeout=5,
+            _ws_connect=AsyncMock(
+                side_effect=None if connects else OSError("no network")
+            ),
+            _ws_monitor=monitor,
+        )
+
+    async def test_subscribes_through_the_web_socket_monitor(self) -> None:
+        api = self.old_client()
+        got = await pc._subscribe(api, {"q": 1}, print, "the command")
+        assert got == "unsubscribe"
+        api._ws_connect.assert_awaited_once()
+        api._ws_monitor.connection_ack.wait.assert_awaited_once()
+        api._ws_monitor.start_subscription.assert_awaited_once_with({"q": 1}, print)
+
+    async def test_a_failure_returns_none(self) -> None:
+        assert (
+            await pc._subscribe(self.old_client(connects=False), {}, print, "x") is None
+        )
+
+    async def test_newer_clients_use_their_own(self) -> None:
+        api = SimpleNamespace(_start_subscription=AsyncMock(return_value="unsub"))
+        assert await pc._subscribe(api, {"q": 1}, print, "x") == "unsub"
+        api._start_subscription.assert_awaited_once_with({"q": 1}, print, "x")
+
+
 class TestSend:
     """The mutation itself."""
 
