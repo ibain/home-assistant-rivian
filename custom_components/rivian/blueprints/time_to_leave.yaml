@@ -32,10 +32,11 @@ blueprint:
     send_mode:
       name: When to send
       description: >-
-        Early: at the look-ahead point, if no other event with a location comes first.
-        Just in time: at start minus travel time minus the buffer. Both (default) sends
-        early and again just in time, so a trip you loaded in between doesn't cost you
-        the destination.
+        Early: at the look-ahead point, if no other event with a location comes first
+        (skipped once the morning send time has passed, unless "Early send after the
+        morning send" is on). Just in time: at start minus travel time minus the buffer.
+        Both (default) sends early and again just in time, so a trip you loaded in
+        between doesn't cost you the destination.
       default: both
       selector:
         select:
@@ -114,6 +115,15 @@ blueprint:
       default: "06:00:00"
       selector:
         time: {}
+    early_after_morning:
+      name: Early send after the morning send
+      description: >-
+        With the morning send on, the day's first event is already loaded, so the early
+        send is skipped once the morning send time has passed. Turn on to send early
+        anyway, for events added to the calendar after the morning send.
+      default: false
+      selector:
+        boolean: {}
     clear_mode:
       name: Clear skipped events
       description: >-
@@ -187,6 +197,8 @@ variables:
   replace: !input replace
   earliest_time: !input earliest_time
   morning_send: !input morning_send
+  morning_time: !input morning_time
+  early_after_morning: !input early_after_morning
   look_ahead: !input look_ahead
   clear_mode: !input clear_mode
   clear_minutes: !input clear_minutes
@@ -372,12 +384,17 @@ actions:
                 ({{ (travel_seconds / 60) | round | int }} min{{ ' with traffic' if google_seconds | int > 0 else ' est.' }}
                 {%- if plan.charge_seconds and include_charging %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
           # One send sequence for both phases; a phase whose time has passed by the
-          # time the previous send went out (a late Park) is merged into it.
+          # time the previous send went out (a late Park) is merged into it. The morning
+          # send already loaded the day's first event, so after the morning time the
+          # early send would only repeat it.
           - variables:
               last_sent: 0
+              morning_covers: >-
+                {{ morning_send and not early_after_morning
+                   and as_timestamp(early_at) >= as_timestamp(today_at(morning_time)) }}
               sends: >-
                 {% set ns = namespace(items=[]) %}
-                {% if send_mode != 'just_in_time' and is_next
+                {% if send_mode != 'just_in_time' and is_next and not morning_covers
                       and (send_mode == 'early' or as_timestamp(early_at) < as_timestamp(send_at)) %}
                   {% set ns.items = ns.items + [dict(at=early_at, title='Loaded: ' ~ title)] %}
                 {% endif %}

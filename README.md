@@ -119,7 +119,7 @@ Calls made by a Home Assistant user require access to the selected vehicle: read
 
 ### Calendar to vehicle: setup
 
-One blueprint turns the actions into "send my next calendar event to the vehicle when it's time to leave", with every setting in the Home Assistant UI. Ahead of each calendar event with a location, it plans the trip from the vehicle's position, sends the destination early (if no other event with a location comes first) and again just in time (start minus travel time minus a buffer). Each morning it can also send the day's first event, so long trips are loaded before you're up. Sends wait for the vehicle to be parked and are skipped once the event has started. Drive time comes from Google when configured (traffic-aware), otherwise from Rivian's planner times a traffic factor; charging stops always come from Rivian's planner.
+One blueprint turns the actions into "send my next calendar event to the vehicle when it's time to leave", with every setting in the Home Assistant UI. Ahead of each calendar event with a location, it plans the trip from the vehicle's position, sends the destination early (if no other event with a location comes first) and again just in time (start minus travel time minus a buffer). Each morning it can also send the day's first event, so long trips are loaded before you're up; once that morning send has gone out, the early send is skipped so the same destination doesn't land twice. Sends wait for the vehicle to be parked and are skipped once the event has started. Drive time comes from Google when configured (traffic-aware), otherwise from Rivian's planner times a traffic factor; charging stops always come from Rivian's planner.
 
 You need: Home Assistant 2026.8 or newer, this integration 1.5.9 or newer, a calendar in Home Assistant, and (optional) the Home Assistant companion app for the leave-by notifications.
 
@@ -143,6 +143,7 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 | Longest wait for Park | 2 h | Sends never happen while driving; this caps the wait |
 | Earliest send time | 06:00 | No sends before this time each day |
 | Morning send, Morning send time | on, 06:00 | Also send the day's first event with a location at this time |
+| Early send after the morning send | off | The early send is skipped once the morning send time has passed, since the morning send already loaded the day's first event. Turn on to send early anyway, for events added after the morning send |
 | Clear skipped events | off | End the trip if you didn't go: at the event's end, or a set number of minutes from its start (negative = before). Only when the vehicle hasn't moved since the send and no other event with a location is coming up |
 | Skip events matching | `://` | Skips meeting links; a regular expression |
 
