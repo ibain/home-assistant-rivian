@@ -117,6 +117,7 @@ async def navigation(hass, freezer):
             "calendars": ["calendar.test"],
             "notify_service": "notify.test",
             "send_mode": "early",
+            "morning_send": False,
         },
         "event": {
             "start": "2026-10-15T09:00:00-07:00",
@@ -252,7 +253,7 @@ async def test_event_send_waits_for_park_inside_the_action(hass, navigation):
 
 async def test_morning_send_waits_for_park_inside_the_action(hass, navigation):
     navigation["events"] = [navigation["event"]]
-    await _run_blueprint(hass, navigation, "morning")
+    await _run_blueprint(hass, navigation, "morning", morning_send=True)
     (call,) = navigation["sent"]
     assert call["wait_for_park"] is True
     assert call["park_timeout"] == {"hours": 2}
@@ -284,7 +285,9 @@ async def test_morning_orders_instants_and_hides_excluded_charging(hass, navigat
             "location": "2 Main St",
         },
     ]
-    await _run_blueprint(hass, navigation, "morning", include_charging=False)
+    await _run_blueprint(
+        hass, navigation, "morning", morning_send=True, include_charging=False
+    )
     assert len(navigation["sent"]) == 1
     notification = navigation["notifications"][0]
     assert "Earlier" in notification["title"]
@@ -300,7 +303,7 @@ async def test_morning_send_can_be_turned_off(hass, navigation):
 
 async def test_morning_without_located_events_sends_nothing(hass, navigation):
     navigation["events"] = [{"start": "2026-10-15T09:00:00-07:00", "summary": "Call"}]
-    await _run_blueprint(hass, navigation, "morning")
+    await _run_blueprint(hass, navigation, "morning", morning_send=True)
     assert not navigation["sent"]
 
 
@@ -322,6 +325,51 @@ async def test_sends_respect_quiet_hours(hass, navigation, freezer, send_mode):
     navigation["event"]["start"] = "2026-10-15T05:30:00-07:00"
     await _run_blueprint(hass, navigation, send_mode=send_mode)
     assert not navigation["sent"]
+
+
+@pytest.mark.parametrize(
+    ("at", "note"),
+    [
+        ("2026-10-15T15:00:00+00:00", "after the morning send, 08:00"),
+        ("2026-10-15T12:30:00+00:00", "before it, 05:30, early held to 06:00"),
+    ],
+)
+async def test_early_send_is_skipped_once_the_morning_send_covers_it(
+    hass, navigation, freezer, at, note
+):
+    """The morning send loads the day's first event; the early send would repeat it."""
+    freezer.move_to(at)
+    await _run_blueprint(hass, navigation, morning_send=True)
+    assert not navigation["sent"], note
+
+
+async def test_early_send_after_the_morning_send_can_be_kept(hass, navigation):
+    await _run_blueprint(hass, navigation, morning_send=True, early_after_morning=True)
+    assert len(navigation["sent"]) == 1
+    assert navigation["notifications"][0]["title"] == "Loaded: Dentist"
+
+
+async def test_early_send_before_the_morning_time_still_goes_out(
+    hass, navigation, freezer
+):
+    freezer.move_to("2026-10-15T12:30:00+00:00")  # 05:30 local
+    await _run_blueprint(hass, navigation, morning_send=True, earliest_time="05:00:00")
+    assert len(navigation["sent"]) == 1
+
+
+async def test_just_in_time_survives_the_morning_skip(hass, navigation, freezer):
+    """In "both" mode only the early phase is dropped after the morning send."""
+    freezer.move_to("2026-10-15T14:00:00+00:00")  # 07:00 local, leave by 07:55
+    task = asyncio.create_task(
+        _run_blueprint(hass, navigation, send_mode="both", morning_send=True)
+    )
+    await navigation["paused"].wait()
+    assert not navigation["sent"]
+    freezer.move_to("2026-10-15T15:05:00+00:00")
+    async_fire_time_changed(hass)
+    await task
+    assert len(navigation["sent"]) == 1
+    assert navigation["notifications"][0]["title"] == "Time to leave: Dentist"
 
 
 async def test_cross_midnight_just_in_time_waits_until_six(hass, navigation, freezer):
@@ -456,7 +504,12 @@ async def test_clear_relative_to_start_can_be_before_it(hass, navigation, freeze
 async def test_morning_send_also_clears(hass, navigation, freezer):
     navigation["events"] = [navigation["event"]]
     task, at = await _run_until_clear_time(
-        hass, navigation, "2026-10-15T17:00:00+00:00", "morning", clear_mode="event_end"
+        hass,
+        navigation,
+        "2026-10-15T17:00:00+00:00",
+        "morning",
+        morning_send=True,
+        clear_mode="event_end",
     )
     await _jump_and_finish(hass, task, freezer, at)
     assert len(navigation["ended"]) == 1
