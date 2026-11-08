@@ -96,6 +96,15 @@ blueprint:
         hours: 2
       selector:
         duration: {}
+    resend_after_detour:
+      name: Re-send after a detour
+      description: >-
+        If you end the loaded trip to go somewhere else first, send it again the next
+        time you park, until the event starts. Nothing is re-sent while a trip is
+        loaded or once you've parked at the destination.
+      default: false
+      selector:
+        boolean: {}
     earliest_time:
       name: Earliest send time
       description: Never send before this time of day.
@@ -199,6 +208,7 @@ variables:
   morning_send: !input morning_send
   morning_time: !input morning_time
   early_after_morning: !input early_after_morning
+  resend_after_detour: !input resend_after_detour
   look_ahead: !input look_ahead
   clear_mode: !input clear_mode
   clear_minutes: !input clear_minutes
@@ -439,6 +449,58 @@ actions:
                               data:
                                 title: "{{ repeat.item.title }}"
                                 message: "{{ summary }}"
+          # Re-send after a detour: each time the vehicle parks again before the
+          # event with no trip loaded, send once more, unless it parked at the
+          # destination. A trip that is still loaded is left alone.
+          - if:
+              - condition: template
+                value_template: "{{ resend_after_detour and sent_any }}"
+            then:
+              - repeat:
+                  until:
+                    - condition: template
+                      value_template: "{{ not waited.parked or arrived }}"
+                  sequence:
+                    - action: rivian.wait_for_park
+                      data:
+                        device_id: !input vehicle
+                        after_drive: true
+                        timeout: !input max_park_wait
+                        not_after: "{{ start }}"
+                      response_variable: waited
+                    - variables:
+                        arrived: >-
+                          {{ waited.parked and tracker != '' and plan.destination.latitude is number
+                             and distance(state_attr(tracker, 'latitude'), state_attr(tracker, 'longitude'),
+                                          plan.destination.latitude, plan.destination.longitude) | float(1) < 0.2 }}
+                    - if:
+                        - condition: template
+                          value_template: "{{ waited.parked and not arrived and not waited.trip_loaded }}"
+                      then:
+                        - action: rivian.send_destination
+                          data:
+                            device_id: !input vehicle
+                            location: "{{ destination }}"
+                            replace: "{{ replace }}"
+                            wait_for_park: true
+                            park_timeout: !input max_park_wait
+                            not_after: "{{ start }}"
+                          response_variable: sent
+                        - if:
+                            - condition: template
+                              value_template: "{{ sent.sent }}"
+                          then:
+                            - variables:
+                                sent_lat: "{{ state_attr(tracker, 'latitude') if tracker else none }}"
+                                sent_lon: "{{ state_attr(tracker, 'longitude') if tracker else none }}"
+                            - if:
+                                - condition: template
+                                  value_template: "{{ notify_service != '' }}"
+                              then:
+                                - action: "{{ notify_service }}"
+                                  data:
+                                    title: "Re-sent: {{ title }}"
+                                    message: "{{ summary }}"
   # Clear a skipped event: the vehicle hasn't moved since the send and nothing
   # else with a location is coming up to replace the trip.
   - if:

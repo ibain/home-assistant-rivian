@@ -1071,6 +1071,28 @@
           "description": "When the trip starts. Defaults to now."
         }
       }
+    },
+    "wait_for_park": {
+      "name": "Wait for Park",
+      "description": "Waits until the vehicle is in Park and reports whether a trip is loaded, for automations that re-send a destination after a detour.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle to watch."
+        },
+        "after_drive": {
+          "name": "After a drive",
+          "description": "Wait for the vehicle to leave Park first, then to park again."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "Give up after this long; the response then has parked: false."
+        },
+        "not_after": {
+          "name": "Not after",
+          "description": "Stop waiting (parked: false) once this time has passed, for example the event's start."
+        }
+      }
     }
   }
 }
