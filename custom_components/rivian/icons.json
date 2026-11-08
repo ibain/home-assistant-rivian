@@ -459,6 +459,9 @@
         },
         "plan_trip": {
             "service": "mdi:map-clock"
+        },
+        "wait_for_park": {
+            "service": "mdi:car-brake-parking"
         }
     }
 }

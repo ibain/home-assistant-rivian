@@ -89,13 +89,15 @@ The `rivian.send_destination` action sends a navigation destination to the vehic
 | `replace`   | no       | End the vehicle's current trip first (default `true`). With `false`, the destination is added as a stop ahead of any open trip |
 | `wait_for_park` | no   | Wait until the vehicle is in Park before sending (default `true`), so a trip being driven is never replaced |
 | `park_timeout`  | no   | Give up with an error if the vehicle isn't in Park within this time (default 2 hours) |
-| `not_after`     | no   | Skip the send, without an error, if this time has passed; for example the event's start |
+| `not_after`     | no   | Skip the send, without an error, if this time has passed; for example the event's start. The Park wait ends there too |
 
 With `replace: true`, a rejected end-trip command stops the send. Navigation commands for the same vehicle run in order, so overlapping automations cannot split an end-trip/send pair.
 
 The action returns `{"result": <int>, "sent": true}` from Rivian, or `{"result": null, "sent": false}` when `not_after` had passed. `result: 0` means Rivian accepted the request, not that the place was found, so check the display when trying a new format.
 
 The `rivian.end_trip` action clears the vehicle's active trip, like the End Trip button on the display. It takes `device_id` and returns `{"success": <bool>, "sequence_number": <int>}`. For a sleeping vehicle, it may stay queued until the vehicle wakes. The server's wake hint alone does not reliably wake it.
+
+The `rivian.wait_for_park` action waits until the vehicle is in Park and returns `{"parked": <bool>, "trip_loaded": <bool>}`, where `trip_loaded` says whether the display has a trip. With `after_drive: true` it first waits for the vehicle to leave Park, so it resolves at the next stop. `timeout` (default 2 hours) and `not_after` end the wait with `parked: false`, never an error. The blueprint uses it to re-send a destination after a detour.
 
 Rivian runs a place search on `location`:
 
@@ -141,6 +143,7 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 | Include charging time | on | Counts the planner's charging stops |
 | Replace the current trip | on | Ends the loaded trip first instead of adding a stop |
 | Longest wait for Park | 2 h | Sends never happen while driving; this caps the wait |
+| Re-send after a detour | off | If you end the loaded trip to go somewhere else first, it is sent again the next time you park, until the event starts. Nothing is re-sent while a trip is loaded or once you've parked at the destination |
 | Earliest send time | 06:00 | No sends before this time each day |
 | Morning send, Morning send time | on, 06:00 | Also send the day's first event with a location at this time |
 | Early send after the morning send | off | The early send is skipped once the morning send time has passed, since the morning send already loaded the day's first event. Turn on to send early anyway, for events added after the morning send |
@@ -157,7 +160,7 @@ For notifications, type your phone's notify action, for example `notify.mobile_a
 
 "The Routes API is not enabled for this API key" almost always means the key and the enabled API are in different projects, the key has an application restriction, or it hasn't propagated yet.
 
-**What to expect.** A send that is still waiting for Park when the event starts is skipped. With "Clear skipped events" on, a trip you never drove is ended at the chosen time and you get a "Cleared" notification; if you left late, the vehicle moved, so nothing is cleared. Early and just-in-time sends that become due together are merged into one. If Google returns no route or fails, the Rivian estimate times the traffic factor is used.
+**What to expect.** A send that is still waiting for Park when the event starts is skipped. With "Clear skipped events" on, a trip you never drove is ended at the chosen time and you get a "Cleared" notification; if you left late, the vehicle moved, so nothing is cleared. Early and just-in-time sends that become due together are merged into one. If Google returns no route or fails, the Rivian estimate times the traffic factor is used. With "Re-send after a detour" on, you get a "Re-sent" notification each time the destination is loaded again; it stops at the event's start, when you park at the destination, or after "Longest wait for Park" without a stop.
 
 The notification reads like "Loaded: Dentist. 1 Main St, Burbank, CA. Leave by 8:38 AM (82 min with traffic)." A Home Assistant restart (including a core update) cancels automation runs that are waiting; on start, the blueprint looks for an event with a location due within the look-ahead and runs the flow for it again, so the destination is re-sent and the just-in-time send re-armed. Deleting an event after it was sent doesn't clear the vehicle; the next send replaces it, or call `rivian.end_trip`.
 

@@ -56,3 +56,24 @@ plan_trip:
       required: false
       selector:
         datetime:
+
+wait_for_park:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: rivian
+    after_drive:
+      default: false
+      selector:
+        boolean:
+    timeout:
+      default:
+        hours: 2
+      selector:
+        duration:
+    not_after:
+      required: false
+      selector:
+        datetime:
