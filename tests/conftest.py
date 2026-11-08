@@ -106,6 +106,14 @@ def _setup_mock_environment() -> None:
         ha_mod = DynamicModule("homeassistant", is_package=True)
         sys.modules["homeassistant"] = ha_mod
 
+        # auth
+        for auth_name in (
+            "homeassistant.auth",
+            "homeassistant.auth.permissions",
+            "homeassistant.auth.permissions.const",
+        ):
+            sys.modules[auth_name] = DynamicModule(auth_name)
+
         # core
         core_mod = DynamicModule("homeassistant.core", is_package=False)
 
