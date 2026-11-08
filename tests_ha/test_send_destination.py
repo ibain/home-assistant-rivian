@@ -32,6 +32,7 @@ from custom_components.rivian.services import (
     SERVICE_END_TRIP,
     SERVICE_PLAN_TRIP,
     SERVICE_SEND_DESTINATION,
+    SERVICE_WAIT_FOR_PARK,
     async_setup_services,
 )
 from homeassistant.auth.const import GROUP_ID_READ_ONLY
@@ -523,8 +524,15 @@ async def test_navigation_rejects_read_only_user(hass, service):
     coordinator.send_vehicle_command.assert_not_awaited()
 
 
-async def test_plan_trip_allows_read_only_user(hass):
-    """Planning needs read access, not control access."""
+@pytest.mark.parametrize(
+    ("service", "data", "key", "value"),
+    [
+        (SERVICE_PLAN_TRIP, {"location": "37.77, -122.42"}, "trip_seconds", 20900),
+        (SERVICE_WAIT_FOR_PARK, {}, "parked", True),
+    ],
+)
+async def test_reading_actions_allow_read_only_user(hass, service, data, key, value):
+    """Planning and waiting need read access, not control access."""
 
     await hass.auth.async_create_user("Owner")
     user = await hass.auth.async_create_user("Reader", group_ids=[GROUP_ID_READ_ONLY])
@@ -538,13 +546,13 @@ async def test_plan_trip_allows_read_only_user(hass):
     )
     result = await hass.services.async_call(
         DOMAIN,
-        SERVICE_PLAN_TRIP,
-        {"device_id": device.id, "location": "37.77, -122.42"},
+        service,
+        {"device_id": device.id, **data},
         blocking=True,
         return_response=True,
         context=Context(user_id=user.id),
     )
-    assert result["trip_seconds"] == 20900
+    assert result[key] == value
 
 
 async def test_navigation_permissions_are_for_selected_vehicle(hass):
@@ -747,3 +755,76 @@ async def test_send_destination_not_after_checked_after_park(
 
     assert await asyncio.wait_for(task, 1) == {"result": None, "sent": False}
     api._Rivian__graphql_query.assert_not_awaited()
+
+
+async def test_wait_for_park_when_already_parked(hass: HomeAssistant) -> None:
+    device, _, _ = _setup_vehicle(hass)
+    result = await _call(hass, SERVICE_WAIT_FOR_PARK, device_id=device.id)
+    assert result == {"parked": True, "trip_loaded": False}
+
+
+async def test_wait_for_park_reports_a_loaded_trip(hass: HomeAssistant) -> None:
+    device, coordinator, _ = _setup_vehicle(hass)
+    coordinator.state["waypoints"] = [{"name": "Costco"}]
+    result = await _call(hass, SERVICE_WAIT_FOR_PARK, device_id=device.id)
+    assert result == {"parked": True, "trip_loaded": True}
+
+
+async def test_wait_for_park_after_a_drive(hass: HomeAssistant) -> None:
+    """after_drive waits for the vehicle to leave Park and park again."""
+    device, coordinator, _ = _setup_vehicle(hass)
+    task = asyncio.create_task(
+        _call(hass, SERVICE_WAIT_FOR_PARK, device_id=device.id, after_drive=True)
+    )
+    await asyncio.sleep(0)
+    assert not task.done()
+    _set_gear(coordinator, "drive")
+    await asyncio.sleep(0)
+    assert not task.done()
+    _set_gear(coordinator, "park")
+    assert await task == {"parked": True, "trip_loaded": False}
+
+
+async def test_wait_for_park_timeout_is_not_an_error(hass: HomeAssistant) -> None:
+    device, coordinator, _ = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+    result = await _call(
+        hass, SERVICE_WAIT_FOR_PARK, device_id=device.id, timeout={"seconds": 0}
+    )
+    assert result == {"parked": False, "trip_loaded": False}
+
+
+async def test_wait_for_park_stops_at_not_after(hass: HomeAssistant) -> None:
+    """A two-hour timeout is cut short at not_after."""
+    device, coordinator, _ = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+    result = await asyncio.wait_for(
+        _call(
+            hass,
+            SERVICE_WAIT_FOR_PARK,
+            device_id=device.id,
+            not_after=dt_util.utcnow() + timedelta(milliseconds=200),
+        ),
+        5,
+    )
+    assert result == {"parked": False, "trip_loaded": False}
+
+
+async def test_send_destination_park_wait_ends_at_not_after(
+    hass: HomeAssistant,
+) -> None:
+    """Waiting for Park stops at the deadline and the send is skipped, not failed."""
+    device, coordinator, api = _setup_vehicle(hass)
+    _set_gear(coordinator, "drive")
+    result = await asyncio.wait_for(
+        _call(
+            hass,
+            SERVICE_SEND_DESTINATION,
+            device_id=device.id,
+            location=LOCATION,
+            not_after=dt_util.utcnow() + timedelta(milliseconds=200),
+        ),
+        5,
+    )
+    assert result == {"result": None, "sent": False}
+    assert _operations(api) == []

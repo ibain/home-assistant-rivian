@@ -136,10 +136,17 @@ async def navigation(hass, freezer):
         "google_calls": [],
         "paused": asyncio.Event(),
         "pause_at": "delay",
+        "waits": [],  # wait_for_park responses, then {"parked": False}
+        "wait_calls": [],
         "plan": {
             "drive_seconds": 1200,
             "charge_seconds": 600,
-            "destination": {"name": "Dentist", "address": "1 Main St"},
+            "destination": {
+                "name": "Dentist",
+                "address": "1 Main St",
+                "latitude": 34.5,
+                "longitude": -119.5,
+            },
         },
         "google": {"routes": [{"duration": 2400}]},
     }
@@ -170,12 +177,19 @@ async def navigation(hass, freezer):
         data["ended"].append(dict(call.data))
         return {"success": True, "sequence_number": 0}
 
+    async def wait_for_park(call):
+        data["wait_calls"].append(dict(call.data))
+        if data["waits"]:
+            return data["waits"].pop(0)
+        return {"parked": False, "trip_loaded": False}
+
     for domain, action, handler, response in [
         ("calendar", "get_events", calendar, SupportsResponse.ONLY),
         ("rivian", "plan_trip", plan, SupportsResponse.ONLY),
         ("google_travel_time", "get_travel_times", google, SupportsResponse.ONLY),
         ("rivian", "send_destination", send, SupportsResponse.OPTIONAL),
         ("rivian", "end_trip", end_trip, SupportsResponse.OPTIONAL),
+        ("rivian", "wait_for_park", wait_for_park, SupportsResponse.ONLY),
     ]:
         hass.services.async_register(
             domain, action, handler, supports_response=response
@@ -370,6 +384,48 @@ async def test_just_in_time_survives_the_morning_skip(hass, navigation, freezer)
     await task
     assert len(navigation["sent"]) == 1
     assert navigation["notifications"][0]["title"] == "Time to leave: Dentist"
+
+
+async def test_detour_resend_is_off_by_default(hass, navigation):
+    await _run_blueprint(hass, navigation)
+    assert navigation["wait_calls"] == []
+
+
+async def test_detour_resend_after_the_trip_was_ended(hass, navigation):
+    """Parked again with no trip loaded: send once more, then keep watching."""
+    navigation["waits"] = [{"parked": True, "trip_loaded": False}]
+    await _run_blueprint(hass, navigation, resend_after_detour=True)
+    assert len(navigation["sent"]) == 2
+    assert navigation["sent"][1]["location"] == "Dentist, 1 Main St"
+    assert navigation["notifications"][1]["title"] == "Re-sent: Dentist"
+    first, second = navigation["wait_calls"]
+    assert first["after_drive"] is True
+    assert first["not_after"] == navigation["event"]["start"]
+    assert first["timeout"] == {"hours": 2}
+    assert second == first  # watched again until the deadline
+
+
+async def test_detour_leaves_a_loaded_trip_alone(hass, navigation):
+    navigation["waits"] = [{"parked": True, "trip_loaded": True}]
+    await _run_blueprint(hass, navigation, resend_after_detour=True)
+    assert len(navigation["sent"]) == 1
+    assert len(navigation["wait_calls"]) == 2
+
+
+async def test_detour_stops_once_parked_at_the_destination(hass, navigation):
+    hass.states.async_set(
+        navigation["tracker"], "not_home", {"latitude": 34.5001, "longitude": -119.5}
+    )
+    navigation["waits"] = [{"parked": True, "trip_loaded": False}]
+    await _run_blueprint(hass, navigation, resend_after_detour=True)
+    assert len(navigation["sent"]) == 1
+    assert len(navigation["wait_calls"]) == 1
+
+
+async def test_detour_watch_needs_a_send(hass, navigation):
+    navigation["send_result"] = {"result": None, "sent": False}
+    await _run_blueprint(hass, navigation, resend_after_detour=True)
+    assert navigation["wait_calls"] == []
 
 
 async def test_cross_midnight_just_in_time_waits_until_six(hass, navigation, freezer):

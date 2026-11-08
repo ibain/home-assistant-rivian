@@ -53,6 +53,7 @@ _LOGGER = logging.getLogger(__name__)
 SERVICE_SEND_DESTINATION = "send_destination"
 SERVICE_END_TRIP = "end_trip"
 SERVICE_PLAN_TRIP = "plan_trip"
+SERVICE_WAIT_FOR_PARK = "wait_for_park"
 ATTR_LOCATION = "location"
 ATTR_DEPARTURE_TIME = "departure_time"
 ATTR_WAKE = "wake"
@@ -60,6 +61,8 @@ ATTR_REPLACE = "replace"
 ATTR_WAIT_FOR_PARK = "wait_for_park"
 ATTR_PARK_TIMEOUT = "park_timeout"
 ATTR_NOT_AFTER = "not_after"
+ATTR_AFTER_DRIVE = "after_drive"
+ATTR_TIMEOUT = "timeout"
 WAKE_TIMEOUT = 30
 DEFAULT_PARK_TIMEOUT = timedelta(hours=2)
 
@@ -85,6 +88,16 @@ PLAN_TRIP_SCHEMA = vol.Schema(
         vol.Optional(ATTR_DEPARTURE_TIME): cv.datetime,
     }
 )
+WAIT_FOR_PARK_SCHEMA = vol.Schema(
+    DEVICE_SCHEMA
+    | {
+        vol.Optional(ATTR_AFTER_DRIVE, default=False): cv.boolean,
+        vol.Optional(
+            ATTR_TIMEOUT, default=DEFAULT_PARK_TIMEOUT
+        ): cv.positive_time_period,
+        vol.Optional(ATTR_NOT_AFTER): cv.datetime,
+    }
+)
 
 
 @callback
@@ -100,9 +113,16 @@ def async_setup_services(hass: HomeAssistant) -> None:
         if call.data[ATTR_WAIT_FOR_PARK]:
             # Never replace the trip being driven; the wait happens outside the
             # lock so end_trip calls aren't held up by it.
-            await _async_wait_for_park(coordinator, call.data[ATTR_PARK_TIMEOUT])
+            timeout = call.data[ATTR_PARK_TIMEOUT]
+            parked = await _async_wait_for_gear(
+                coordinator, True, _wait_budget(timeout, not_after)
+            )
             if _is_past(not_after):
                 return {"result": None, "sent": False}
+            if not parked:
+                raise HomeAssistantError(
+                    f"Vehicle did not shift into Park within {timeout}"
+                )
         async with navigation_locks.setdefault(coordinator.vehicle_id, asyncio.Lock()):
             if call.data[ATTR_WAKE]:
                 await _async_wake(hass, coordinator)
@@ -162,12 +182,37 @@ def async_setup_services(hass: HomeAssistant) -> None:
         )
         return {"destination": destination, **plan}
 
+    async def async_wait_for_park_service(call: ServiceCall) -> ServiceResponse:
+        coordinator, _ = await _async_get_vehicle(hass, call, POLICY_READ)
+        not_after = call.data.get(ATTR_NOT_AFTER)
+        deadline = dt_util.utcnow() + _wait_budget(call.data[ATTR_TIMEOUT], not_after)
+        parked = True
+        if call.data[ATTR_AFTER_DRIVE]:
+            parked = await _async_wait_for_gear(
+                coordinator, False, deadline - dt_util.utcnow()
+            )
+        if parked:
+            parked = await _async_wait_for_gear(
+                coordinator, True, deadline - dt_util.utcnow()
+            )
+        return {
+            "parked": parked and not _is_past(not_after),
+            "trip_loaded": bool(coordinator.get("waypoints")),
+        }
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_END_TRIP,
         async_end_trip_service,
         schema=END_TRIP_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_WAIT_FOR_PARK,
+        async_wait_for_park_service,
+        schema=WAIT_FOR_PARK_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
@@ -183,29 +228,38 @@ def _is_past(moment: datetime | None) -> bool:
     return moment is not None and dt_util.as_utc(moment) <= dt_util.utcnow()
 
 
-async def _async_wait_for_park(
-    coordinator: VehicleCoordinator, timeout: timedelta
-) -> None:
-    """Wait until the vehicle is in Park, or raise after `timeout`."""
-    parked = asyncio.Event()
+def _wait_budget(timeout: timedelta, not_after: datetime | None) -> timedelta:
+    """Return how long to wait: `timeout`, cut short at `not_after`."""
+    if not_after is None:
+        return timeout
+    return max(min(timeout, dt_util.as_utc(not_after) - dt_util.utcnow()), timedelta(0))
+
+
+async def _async_wait_for_gear(
+    coordinator: VehicleCoordinator, parked: bool, timeout: timedelta
+) -> bool:
+    """Wait until the vehicle is in Park (or out of it, with parked=False).
+
+    Returns False if that didn't happen within `timeout`.
+    """
+    reached = asyncio.Event()
 
     @callback
     def _check_gear() -> None:
-        if coordinator.get("gearStatus") == "park":
-            parked.set()
+        if (coordinator.get("gearStatus") == "park") == parked:
+            reached.set()
 
     _check_gear()
-    if parked.is_set():
-        return
+    if reached.is_set():
+        return True
     unsubscribe = coordinator.async_add_listener(_check_gear)
     try:
-        await asyncio.wait_for(parked.wait(), timeout.total_seconds())
+        await asyncio.wait_for(reached.wait(), timeout.total_seconds())
     except TimeoutError:
-        raise HomeAssistantError(
-            f"Vehicle did not shift into Park within {timeout}"
-        ) from None
+        return False
     finally:
         unsubscribe()
+    return True
 
 
 def _parse_coordinates(text: str) -> tuple[float, float] | None:
