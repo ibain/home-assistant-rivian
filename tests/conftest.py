@@ -868,10 +868,15 @@ def _setup_mock_environment() -> None:
         # coordinator.py imports the Parallax decoder; tests patch it as needed
         parallax_submod = DynamicModule("rivian.parallax", is_package=False)
         parallax_submod.decode_parallax_message = MagicMock(return_value=None)  # type: ignore[attr-defined]
+        # parallax_command.py builds its commands from these at import
+        parallax_submod.LOCK_RVM = "body.locks.lock"  # type: ignore[attr-defined]
+        parallax_submod.UNLOCK_RVM = "body.locks.unlock"  # type: ignore[attr-defined]
+        parallax_submod.encode_lock = lambda: b""  # type: ignore[attr-defined]
+        parallax_submod.encode_unlock = lambda: b"\x08\x01"  # type: ignore[attr-defined]
         rivian_mod.parallax = parallax_submod  # type: ignore[attr-defined]
         sys.modules["rivian.parallax"] = parallax_submod
 
-        # parallax_command.py imports the gateway URL and base headers
+        # api_ext.py imports the gateway URL and base headers
         client_submod = DynamicModule("rivian.rivian", is_package=False)
         client_submod.BASE_HEADERS = {}  # type: ignore[attr-defined]
         client_submod.GRAPHQL_GATEWAY = "https://gateway.test/graphql"  # type: ignore[attr-defined]
