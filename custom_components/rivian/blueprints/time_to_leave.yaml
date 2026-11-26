@@ -1,0 +1,551 @@
+blueprint:
+  name: "Rivian: send calendar events to the vehicle when it's time to leave"
+  description: >-
+    Ahead of each calendar event with a location, ask Rivian's trip planner how long
+    the trip takes from where the vehicle is, send the destination early (if nothing
+    else is coming up first), and send it again just in time, so a trip in between
+    doesn't cost you the destination. Optionally also sends the day's first event at a
+    fixed time each morning. Sends wait for the vehicle to be parked. Needs the Rivian
+    (Unofficial) integration's rivian.plan_trip and rivian.send_destination actions.
+  domain: automation
+  source_url: https://github.com/ibain/home-assistant-rivian/blob/fork/main/custom_components/rivian/blueprints/time_to_leave.yaml
+  input:
+    vehicle:
+      name: Vehicle
+      selector:
+        device:
+          integration: rivian
+    calendars:
+      name: Calendars
+      description: Events with a location on these calendars are sent to the vehicle.
+      selector:
+        entity:
+          domain: calendar
+          multiple: true
+    look_ahead:
+      name: Look ahead
+      description: How long before an event to plan the trip (and send it early).
+      default:
+        hours: 3
+      selector:
+        duration: {}
+    send_mode:
+      name: When to send
+      description: >-
+        Early: at the look-ahead point, if no other event with a location comes first
+        (skipped once the morning send time has passed, unless "Early send after the
+        morning send" is on). Just in time: at start minus travel time minus the buffer.
+        Both (default) sends early and again just in time, so a trip you loaded in
+        between doesn't cost you the destination.
+      default: both
+      selector:
+        select:
+          options:
+            - label: Early and just in time
+              value: both
+            - label: Early only
+              value: early
+            - label: Just in time only
+              value: just_in_time
+    traffic_factor:
+      name: Traffic factor
+      description: >-
+        Rivian's planner gives free-flow drive times. Drive time is multiplied by this
+        for the leave-by time (charging time is not).
+      default: 1.5
+      selector:
+        number:
+          min: 1
+          max: 3
+          step: 0.1
+    google_entry:
+      name: Google Travel Time (optional)
+      description: >-
+        A Google Travel Time integration entry. When set, Google's traffic-aware drive
+        time replaces the planner's drive time times the traffic factor. Charging time
+        still comes from Rivian's planner.
+      default: ""
+      selector:
+        config_entry:
+          integration: google_travel_time
+    buffer_minutes:
+      name: Buffer
+      description: Minutes of slack before the leave-by time.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 180
+          unit_of_measurement: min
+    include_charging:
+      name: Include charging time
+      description: Count the planner's charging stops in the travel time.
+      default: true
+      selector:
+        boolean: {}
+    replace:
+      name: Replace the current trip
+      description: End whatever trip is loaded before sending. Off adds the destination as a stop.
+      default: true
+      selector:
+        boolean: {}
+    max_park_wait:
+      name: Longest wait for Park
+      description: Sends wait for the vehicle to be parked; give up after this long.
+      default:
+        hours: 2
+      selector:
+        duration: {}
+    resend_after_detour:
+      name: Re-send after a detour
+      description: >-
+        If you end the loaded trip to go somewhere else first, send it again the next
+        time you park, until the event starts. Nothing is re-sent while a trip is
+        loaded or once you've parked at the destination.
+      default: false
+      selector:
+        boolean: {}
+    earliest_time:
+      name: Earliest send time
+      description: Never send before this time of day.
+      default: "06:00:00"
+      selector:
+        time: {}
+    morning_send:
+      name: Morning send
+      description: >-
+        Also send the day's first event with a location at the morning send time, so
+        it's loaded before you're up even if its trip is longer than the look-ahead.
+      default: true
+      selector:
+        boolean: {}
+    morning_time:
+      name: Morning send time
+      default: "06:00:00"
+      selector:
+        time: {}
+    early_after_morning:
+      name: Early send after the morning send
+      description: >-
+        With the morning send on, the day's first event is already loaded, so the early
+        send is skipped once the morning send time has passed. Turn on to send early
+        anyway, for events added to the calendar after the morning send.
+      default: false
+      selector:
+        boolean: {}
+    clear_mode:
+      name: Clear skipped events
+      description: >-
+        End the trip if you didn't go: the vehicle hasn't moved since the send and no
+        other event with a location is coming up. Choose when to check.
+      default: "off"
+      selector:
+        select:
+          options:
+            - label: "Don't clear"
+              value: "off"
+            - label: At the event's end
+              value: event_end
+            - label: At a set time from the event's start
+              value: from_start
+    clear_minutes:
+      name: Clear offset from the start
+      description: >-
+        Minutes after the event's start to clear, for "At a set time from the event's
+        start". Negative clears before the start.
+      default: 30
+      selector:
+        number:
+          min: -720
+          max: 1440
+          step: 5
+          unit_of_measurement: min
+    skip_pattern:
+      name: Skip events matching
+      description: >-
+        Regular expression; events whose location or title matches are skipped.
+        The default skips meeting links. Leave empty to skip nothing.
+      default: "://"
+      selector:
+        text: {}
+    notify_service:
+      name: Notify action (optional)
+      description: >-
+        An action to call when a destination is sent, for example
+        notify.mobile_app_my_phone. Leave empty for no notification.
+      default: ""
+      selector:
+        text: {}
+
+mode: parallel
+max_exceeded: silent
+
+triggers:
+  - trigger: calendar.event_started
+    id: event
+    target:
+      entity_id: !input calendars
+    options:
+      offset: !input look_ahead
+      offset_type: before
+  - trigger: time
+    id: morning
+    at: !input morning_time
+  - trigger: homeassistant
+    event: start
+    id: restart
+
+variables:
+  vehicle: !input vehicle
+  calendars: !input calendars
+  send_mode: !input send_mode
+  traffic_factor: !input traffic_factor
+  google_entry: !input google_entry
+  buffer_minutes: !input buffer_minutes
+  include_charging: !input include_charging
+  replace: !input replace
+  earliest_time: !input earliest_time
+  morning_send: !input morning_send
+  morning_time: !input morning_time
+  early_after_morning: !input early_after_morning
+  resend_after_detour: !input resend_after_detour
+  look_ahead: !input look_ahead
+  clear_mode: !input clear_mode
+  clear_minutes: !input clear_minutes
+  skip_pattern: !input skip_pattern
+  notify_service: !input notify_service
+  calendar_event: "{{ trigger.calendar_event | default({}, true) }}"
+  title: "{{ calendar_event.summary | default('', true) }}"
+  start: "{{ calendar_event.start | default('', true) }}"
+  end: "{{ calendar_event.end | default('', true) }}"
+  tracker: "{{ device_entities(vehicle) | select('search', '^device_tracker[.]') | first | default('') }}"
+  sent_any: false
+  location: >-
+    {{ calendar_event.location | default('', true)
+       | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
+
+actions:
+  # After a restart, pick up the next event with a location inside the look-ahead:
+  # the run that was waiting to send it was cancelled by the restart.
+  - if:
+      - condition: template
+        value_template: "{{ trigger.id == 'restart' }}"
+    then:
+      - action: calendar.get_events
+        target:
+          entity_id: !input calendars
+        data:
+          start_date_time: "{{ now().isoformat() }}"
+          end_date_time: "{{ (now() + timedelta(**look_ahead)).isoformat() }}"
+        response_variable: pending
+      - variables:
+          calendar_event: >-
+            {% set ns = namespace(found={}) %}
+            {% for ev in pending.values() | map(attribute='events') | sum(start=[]) %}
+              {% set loc = ev.location | default('', true) %}
+              {% if loc != '' and 'T' in ev.start and as_timestamp(ev.start) > as_timestamp(now())
+                    and (not ns.found or as_timestamp(ev.start) < as_timestamp(ns.found.start))
+                    and not (skip_pattern and (loc is search(skip_pattern) or (ev.summary | default('', true)) is search(skip_pattern))) %}
+                {% set ns.found = ev %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.found }}
+          title: "{{ calendar_event.summary | default('', true) }}"
+          start: "{{ calendar_event.start | default('', true) }}"
+          end: "{{ calendar_event.end | default('', true) }}"
+          location: >-
+            {{ calendar_event.location | default('', true)
+               | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim }}
+  - choose:
+      # Morning: the day's first event with a location, sent at a fixed time.
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'morning' and morning_send }}"
+        sequence:
+          - action: calendar.get_events
+            target:
+              entity_id: !input calendars
+            data:
+              start_date_time: "{{ now().isoformat() }}"
+              end_date_time: "{{ today_at('23:59:59').isoformat() }}"
+            response_variable: events
+          - variables:
+              event: >-
+                {% set ns = namespace(found=none) %}
+                {% for ev in events.values() | map(attribute='events') | sum(start=[]) %}
+                  {% set loc = ev.location | default('', true) | replace('\n', ', ') | regex_replace('\\s{2,}', ' ') | trim %}
+                  {% set ev_title = ev.summary | default('', true) %}
+                  {% if loc != '' and 'T' in ev.start
+                        and as_timestamp(ev.start) > as_timestamp(now())
+                        and (ns.found is none or as_timestamp(ev.start) < as_timestamp(ns.found.start))
+                        and not (skip_pattern and (loc is search(skip_pattern) or ev_title is search(skip_pattern))) %}
+                    {% set ns.found = {'start': ev.start, 'end': ev.end | default('', true), 'title': ev_title, 'location': loc} %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.found }}
+          - condition: template
+            value_template: "{{ event is mapping }}"
+          - variables:
+              start: "{{ event.start }}"
+              end: "{{ event.end }}"
+              title: "{{ event.title }}"
+          - action: rivian.plan_trip
+            data:
+              device_id: !input vehicle
+              location: "{{ event.location }}"
+            response_variable: plan
+          - variables:
+              travel_seconds: "{{ (plan.drive_seconds * traffic_factor + (plan.charge_seconds if include_charging else 0)) | int }}"
+              destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or event.location }}"
+              leave_by: "{{ (as_datetime(event.start) - timedelta(seconds=travel_seconds + buffer_minutes * 60)) | as_local }}"
+          - action: rivian.send_destination
+            data:
+              device_id: !input vehicle
+              location: "{{ destination }}"
+              replace: "{{ replace }}"
+              wait_for_park: true
+              park_timeout: !input max_park_wait
+              not_after: "{{ event.start }}"
+            response_variable: sent
+          - if:
+              - condition: template
+                value_template: "{{ sent.sent }}"
+            then:
+              - variables:
+                  sent_any: true
+                  sent_lat: "{{ state_attr(tracker, 'latitude') if tracker else none }}"
+                  sent_lon: "{{ state_attr(tracker, 'longitude') if tracker else none }}"
+          - if:
+              - condition: template
+                value_template: "{{ sent.sent and notify_service != '' }}"
+            then:
+              - action: "{{ notify_service }}"
+                data:
+                  title: "Loaded: {{ event.title }}"
+                  message: >-
+                    {{ destination }}. Leave by {{ leave_by | as_timestamp | timestamp_custom('%-I:%M %p') }}
+                    ({{ (travel_seconds / 60) | round | int }} min est.
+                    {%- if plan.charge_seconds and include_charging %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
+      # Each event with a location: plan ahead, send early and just in time.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id in ['event', 'restart'] and location != '' and 'T' in start
+                 and not (skip_pattern and (location is search(skip_pattern) or title is search(skip_pattern))) }}
+        sequence:
+          - action: rivian.plan_trip
+            data:
+              device_id: !input vehicle
+              location: "{{ location }}"
+            response_variable: plan
+          # other events with a location that start before this one
+          - action: calendar.get_events
+            target:
+              entity_id: !input calendars
+            data:
+              start_date_time: "{{ now().isoformat() }}"
+              end_date_time: "{{ (as_datetime(start) - timedelta(seconds=1)).isoformat() }}"
+            response_variable: upcoming
+          - variables:
+              estimated_drive: "{{ (plan.drive_seconds * traffic_factor) | int }}"
+              depart_time: >-
+                {% set t = as_datetime(start) | as_local - timedelta(seconds=estimated_drive) %}
+                {{ t.strftime('%H:%M') if t > now() else '' }}
+              google_seconds: 0
+          # Google's traffic-aware drive time, when a Google Travel Time entry is set
+          - if:
+              - condition: template
+                value_template: "{{ google_entry != '' and tracker != '' and state_attr(tracker, 'latitude') is not none and (plan.destination.address | default('', true)) != '' }}"
+            then:
+              - action: google_travel_time.get_travel_times
+                continue_on_error: true
+                # Render one mapping so entity IDs and addresses remain strings.
+                data: >-
+                  {% set data = dict(config_entry_id=google_entry, origin=tracker,
+                                     destination=plan.destination.address, traffic_model='best_guess') %}
+                  {{ dict(data, departure_time=depart_time) if depart_time != '' else data }}
+                response_variable: google
+              - variables:
+                  google_seconds: >-
+                    {{ google.routes[0].duration | default(0, true)
+                       if google is defined and (google.routes | default([], true)) else 0 }}
+          - variables:
+              travel_seconds: >-
+                {{ ((google_seconds if google_seconds | int > 0 else estimated_drive) + (plan.charge_seconds if include_charging else 0)) | int }}
+              destination: "{{ [plan.destination.name, plan.destination.address] | select | join(', ') or location }}"
+              leave_by: "{{ (as_datetime(start) - timedelta(seconds=travel_seconds + buffer_minutes * 60)) | as_local }}"
+              early_at: "{{ [now(), today_at(earliest_time)] | max | string }}"
+              send_at: >-
+                {% set t = [as_datetime(leave_by), now()] | max %}
+                {% set earliest = today_at(earliest_time).replace(year=t.year, month=t.month, day=t.day) %}
+                {{ [t, earliest] | max | string }}
+              is_next: >-
+                {% set ns = namespace(n=0) %}
+                {% for ev in upcoming.values() | map(attribute='events') | sum(start=[]) %}
+                  {% set loc = ev.location | default('', true) %}
+                  {% if loc != '' and 'T' in ev.start and as_timestamp(ev.start) < as_timestamp(start)
+                        and not (skip_pattern and (loc is search(skip_pattern) or (ev.summary | default('', true)) is search(skip_pattern))) %}
+                    {% set ns.n = ns.n + 1 %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.n == 0 }}
+              summary: >-
+                {{ destination }}. Leave by {{ leave_by | as_timestamp | timestamp_custom('%-I:%M %p') }}
+                ({{ (travel_seconds / 60) | round | int }} min{{ ' with traffic' if google_seconds | int > 0 else ' est.' }}
+                {%- if plan.charge_seconds and include_charging %}, incl. {{ (plan.charge_seconds / 60) | round | int }} min charging{% endif %}).
+          # One send sequence for both phases; a phase whose time has passed by the
+          # time the previous send went out (a late Park) is merged into it. The morning
+          # send already loaded the day's first event, so after the morning time the
+          # early send would only repeat it.
+          - variables:
+              last_sent: 0
+              morning_covers: >-
+                {{ morning_send and not early_after_morning
+                   and as_timestamp(early_at) >= as_timestamp(today_at(morning_time)) }}
+              sends: >-
+                {% set ns = namespace(items=[]) %}
+                {% if send_mode != 'just_in_time' and is_next and not morning_covers
+                      and (send_mode == 'early' or as_timestamp(early_at) < as_timestamp(send_at)) %}
+                  {% set ns.items = ns.items + [dict(at=early_at, title='Loaded: ' ~ title)] %}
+                {% endif %}
+                {% if send_mode != 'early' %}
+                  {% set ns.items = ns.items + [dict(at=send_at, title='Time to leave: ' ~ title)] %}
+                {% endif %}
+                {{ ns.items }}
+          - repeat:
+              for_each: "{{ sends }}"
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ as_timestamp(repeat.item.at) > last_sent
+                           and as_timestamp(repeat.item.at) < as_timestamp(start) }}
+                  then:
+                    - delay:
+                        seconds: "{{ [0, as_timestamp(repeat.item.at) - as_timestamp(now())] | max }}"
+                    - action: rivian.send_destination
+                      data:
+                        device_id: !input vehicle
+                        location: "{{ destination }}"
+                        replace: "{{ replace }}"
+                        wait_for_park: true
+                        park_timeout: !input max_park_wait
+                        not_after: "{{ start }}"
+                      response_variable: sent
+                    - if:
+                        - condition: template
+                          value_template: "{{ sent.sent }}"
+                      then:
+                        - variables:
+                            last_sent: "{{ as_timestamp(now()) }}"
+                            sent_any: true
+                            sent_lat: "{{ state_attr(tracker, 'latitude') if tracker else none }}"
+                            sent_lon: "{{ state_attr(tracker, 'longitude') if tracker else none }}"
+                        - if:
+                            - condition: template
+                              value_template: "{{ notify_service != '' }}"
+                          then:
+                            - action: "{{ notify_service }}"
+                              data:
+                                title: "{{ repeat.item.title }}"
+                                message: "{{ summary }}"
+          # Re-send after a detour: each time the vehicle parks again before the
+          # event with no trip loaded, send once more, unless it parked at the
+          # destination. A trip that is still loaded is left alone.
+          - if:
+              - condition: template
+                value_template: "{{ resend_after_detour and sent_any }}"
+            then:
+              - repeat:
+                  until:
+                    - condition: template
+                      value_template: "{{ not waited.parked or arrived }}"
+                  sequence:
+                    - action: rivian.wait_for_park
+                      data:
+                        device_id: !input vehicle
+                        after_drive: true
+                        timeout: !input max_park_wait
+                        not_after: "{{ start }}"
+                      response_variable: waited
+                    - variables:
+                        arrived: >-
+                          {{ waited.parked and tracker != '' and plan.destination.latitude is number
+                             and distance(state_attr(tracker, 'latitude'), state_attr(tracker, 'longitude'),
+                                          plan.destination.latitude, plan.destination.longitude) | float(1) < 0.2 }}
+                    - if:
+                        - condition: template
+                          value_template: "{{ waited.parked and not arrived and not waited.trip_loaded }}"
+                      then:
+                        - action: rivian.send_destination
+                          data:
+                            device_id: !input vehicle
+                            location: "{{ destination }}"
+                            replace: "{{ replace }}"
+                            wait_for_park: true
+                            park_timeout: !input max_park_wait
+                            not_after: "{{ start }}"
+                          response_variable: sent
+                        - if:
+                            - condition: template
+                              value_template: "{{ sent.sent }}"
+                          then:
+                            - variables:
+                                sent_lat: "{{ state_attr(tracker, 'latitude') if tracker else none }}"
+                                sent_lon: "{{ state_attr(tracker, 'longitude') if tracker else none }}"
+                            - if:
+                                - condition: template
+                                  value_template: "{{ notify_service != '' }}"
+                              then:
+                                - action: "{{ notify_service }}"
+                                  data:
+                                    title: "Re-sent: {{ title }}"
+                                    message: "{{ summary }}"
+  # Clear a skipped event: the vehicle hasn't moved since the send and nothing
+  # else with a location is coming up to replace the trip.
+  - if:
+      - condition: template
+        value_template: "{{ clear_mode != 'off' and sent_any and start != '' }}"
+    then:
+      - variables:
+          clear_at: >-
+            {% if clear_mode == 'event_end' and end != '' %}{{ end }}
+            {%- else %}{{ (as_datetime(start) + timedelta(minutes=clear_minutes)).isoformat() }}{% endif %}
+      - delay:
+          seconds: "{{ [0, as_timestamp(clear_at) - as_timestamp(now())] | max }}"
+      - action: calendar.get_events
+        target:
+          entity_id: !input calendars
+        data:
+          start_date_time: "{{ now().isoformat() }}"
+          end_date_time: "{{ (as_datetime(clear_at) + timedelta(**look_ahead)).isoformat() }}"
+        response_variable: upcoming_after
+      - variables:
+          another_event: >-
+            {% set ns = namespace(n=0) %}
+            {% for ev in upcoming_after.values() | map(attribute='events') | sum(start=[]) %}
+              {% set loc = ev.location | default('', true) %}
+              {% if loc != '' and 'T' in ev.start and as_timestamp(ev.start) != as_timestamp(start)
+                    and not (skip_pattern and (loc is search(skip_pattern) or (ev.summary | default('', true)) is search(skip_pattern))) %}
+                {% set ns.n = ns.n + 1 %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.n > 0 }}
+          stayed: >-
+            {{ tracker != '' and sent_lat is not none and state_attr(tracker, 'latitude') is not none
+               and distance(state_attr(tracker, 'latitude'), state_attr(tracker, 'longitude'), sent_lat, sent_lon) | float(1) < 0.2 }}
+      - if:
+          - condition: template
+            value_template: "{{ stayed and not another_event }}"
+        then:
+          - action: rivian.end_trip
+            data:
+              device_id: !input vehicle
+          - if:
+              - condition: template
+                value_template: "{{ notify_service != '' }}"
+            then:
+              - action: "{{ notify_service }}"
+                data:
+                  title: "Cleared: {{ title }}"
+                  message: "The vehicle didn't move, so the trip to {{ destination }} was ended."

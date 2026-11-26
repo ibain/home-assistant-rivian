@@ -546,6 +546,15 @@
         },
         "end_trip": {
             "service": "mdi:map-marker-off"
+        },
+        "send_destination": {
+            "service": "mdi:map-marker-path"
+        },
+        "plan_trip": {
+            "service": "mdi:map-clock"
+        },
+        "wait_for_park": {
+            "service": "mdi:car-brake-parking"
         }
     }
 }

@@ -119,6 +119,10 @@ def _setup_mock_environment() -> None:
 
         # core
         core_mod = DynamicModule("homeassistant.core", is_package=False)
+        # navigation.py registers actions that return responses
+        core_mod.SupportsResponse = types.SimpleNamespace(  # type: ignore[attr-defined]
+            NONE="none", OPTIONAL="optional", ONLY="only"
+        )
 
         class MockServiceCall:
             """Mock Home Assistant ServiceCall."""
@@ -636,6 +640,12 @@ def _setup_mock_environment() -> None:
         helpers_mod.typing.StateType = Any  # type: ignore[attr-defined]
         sys.modules["homeassistant.helpers.typing"] = helpers_mod.typing
 
+        # navigation.py installs its blueprints once Home Assistant has started
+        helpers_mod.start = DynamicModule(  # type: ignore[attr-defined]
+            "homeassistant.helpers.start", is_package=False
+        )
+        sys.modules["homeassistant.helpers.start"] = helpers_mod.start
+
         sys.modules["homeassistant.helpers"] = helpers_mod
         sys.modules["homeassistant.helpers.entity"] = helpers_mod.entity
         sys.modules["homeassistant.helpers.device_registry"] = (
@@ -1044,6 +1054,13 @@ def _setup_mock_environment() -> None:
         parallax_submod.decode_parallax_message = MagicMock(return_value=None)  # type: ignore[attr-defined]
         rivian_mod.parallax = parallax_submod  # type: ignore[attr-defined]
         sys.modules["rivian.parallax"] = parallax_submod
+
+        # api_ext.py imports the gateway URL and base headers
+        client_submod = DynamicModule("rivian.rivian", is_package=False)
+        client_submod.BASE_HEADERS = {}  # type: ignore[attr-defined]
+        client_submod.GRAPHQL_GATEWAY = "https://gateway.test/graphql"  # type: ignore[attr-defined]
+        rivian_mod.rivian = client_submod  # type: ignore[attr-defined]
+        sys.modules["rivian.rivian"] = client_submod
 
         # button.py imports the BLE pairing helpers
         ble_submod = DynamicModule("rivian.ble", is_package=False)

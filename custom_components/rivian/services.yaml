@@ -230,3 +230,63 @@ send_trip:
 end_trip:
   fields:
     device_id: *device_id
+
+send_destination:
+  fields:
+    device_id: *device_id
+    location:
+      required: true
+      example: "Costco Wholesale, 1051 W Burbank Blvd, Burbank, CA 91506"
+      selector:
+        text:
+    wake:
+      default: true
+      selector:
+        boolean:
+    replace:
+      default: true
+      selector:
+        boolean:
+    wait_for_park:
+      default: true
+      selector:
+        boolean:
+    park_timeout:
+      default:
+        hours: 2
+      selector:
+        duration:
+    not_after:
+      required: false
+      selector:
+        datetime:
+
+plan_trip:
+  fields:
+    device_id: *device_id
+    location:
+      required: true
+      example: "Costco Goleta"
+      selector:
+        text:
+    departure_time:
+      required: false
+      selector:
+        datetime:
+
+wait_for_park:
+  fields:
+    device_id: *device_id
+    after_drive:
+      default: false
+      selector:
+        boolean:
+    timeout:
+      default:
+        hours: 2
+      selector:
+        duration:
+    not_after:
+      required: false
+      selector:
+        datetime:

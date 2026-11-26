@@ -1410,6 +1410,80 @@
           "description": "The Rivian vehicle."
         }
       }
+    },
+    "send_destination": {
+      "name": "Send destination",
+      "description": "Sends a navigation destination to the vehicle. Rivian looks up the text as a place search.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle to send the destination to."
+        },
+        "location": {
+          "name": "Location",
+          "description": "A place name, a business name with its address, a street address, or a Google Maps share link. A person's name will not resolve; send their address instead."
+        },
+        "wake": {
+          "name": "Wake vehicle",
+          "description": "Wake the vehicle first if it is asleep and vehicle control is set up. Otherwise a sleeping vehicle gets the destination when it next wakes."
+        },
+        "replace": {
+          "name": "Replace current trip",
+          "description": "End the vehicle's current trip first, so the destination doesn't get added as an extra stop."
+        },
+        "wait_for_park": {
+          "name": "Wait until parked",
+          "description": "Wait for the vehicle to be in Park before sending, so a trip being driven is never replaced."
+        },
+        "park_timeout": {
+          "name": "Longest wait for Park",
+          "description": "Give up (with an error) if the vehicle isn't in Park within this time."
+        },
+        "not_after": {
+          "name": "Not after",
+          "description": "Skip the send (without an error) if this time has passed, for example the event's start."
+        }
+      }
+    },
+    "plan_trip": {
+      "name": "Plan trip",
+      "description": "Plans a trip from the vehicle's current position with Rivian's trip planner and returns the drive time, charging stops and arrival charge. Nothing is sent to the vehicle.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle to plan for."
+        },
+        "location": {
+          "name": "Destination",
+          "description": "A place name, address, Google Maps share link, or latitude,longitude."
+        },
+        "departure_time": {
+          "name": "Departure time",
+          "description": "When the trip starts. Defaults to now."
+        }
+      }
+    },
+    "wait_for_park": {
+      "name": "Wait for Park",
+      "description": "Waits until the vehicle is in Park and reports whether a trip is loaded, for automations that re-send a destination after a detour.",
+      "fields": {
+        "device_id": {
+          "name": "Vehicle",
+          "description": "The Rivian vehicle to watch."
+        },
+        "after_drive": {
+          "name": "After a drive",
+          "description": "Wait for the vehicle to leave Park first, then to park again."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "Give up after this long; the response then has parked: false."
+        },
+        "not_after": {
+          "name": "Not after",
+          "description": "Stop waiting (parked: false) once this time has passed, for example the event's start."
+        }
+      }
     }
   },
   "exceptions": {

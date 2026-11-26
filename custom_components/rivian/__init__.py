@@ -40,6 +40,7 @@ from .helpers import (
     departure_schedules_from_message,
     get_rivian_api_from_entry,
 )
+from .navigation import async_setup_navigation
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ DEPARTURE_SCHEDULES_WAIT = 10
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Rivian integration."""
     async_setup_services(hass)
+    async_setup_navigation(hass)
     try:
         await async_register_cards(hass)
     except Exception:  # the vehicles still set up without the dashboard cards
